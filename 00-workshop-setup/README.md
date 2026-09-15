@@ -8,6 +8,9 @@ This lab deploys the shared AWS resources used by all later labs:
 - Amazon ECR repository.
 - EKS Pod Identity roles for the application and load balancer controller.
 - AWS Load Balancer Controller.
+- Customer-managed AWS KMS key for agent memory.
+- On-demand DynamoDB table with TTL and point-in-time recovery.
+- DynamoDB vector index for semantic long-term memory.
 
 From the repository root:
 
@@ -17,8 +20,9 @@ From the repository root:
 ```
 
 The script uses the default AWS CLI profile unless `--profile` is provided.
-It uploads the mortgage documents, waits for ingestion, configures `kubectl`,
-and installs the load balancer controller. It does not deploy the application.
+It provisions the DynamoDB memory table, uploads the mortgage documents, waits
+for ingestion, configures `kubectl`, and installs the load balancer controller.
+It does not deploy the application.
 
 To remove all workshop resources:
 

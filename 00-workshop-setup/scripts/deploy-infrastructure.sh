@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for command_name in aws curl helm kubectl; do
+for command_name in aws curl helm kubectl uv; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Required command not found: $command_name" >&2
     exit 1
@@ -103,6 +103,27 @@ KB_PARAMETER_NAME="$(stack_output KnowledgeBaseParameterName)"
 CLUSTER_NAME="$(stack_output EksClusterName)"
 REPOSITORY_URI="$(stack_output EcrRepositoryUri)"
 VPC_ID="$(stack_output VpcId)"
+MEMORY_TABLE_NAME="$(stack_output MemoryTableName)"
+MEMORY_KMS_KEY_ARN="$(stack_output MemoryKmsKeyArn)"
+MEMORY_VECTOR_INDEX_NAME="$(stack_output MemoryVectorIndexName)"
+MEMORY_EMBEDDING_MODEL_ID="$(stack_output MemoryEmbeddingModelId)"
+
+echo "Installing the pinned workshop setup Python environment"
+uv sync --project "$MODULE_DIR" --frozen
+
+MEMORY_PROVISION_OPTIONS=(
+  --table-name "$MEMORY_TABLE_NAME"
+  --vector-index-name "$MEMORY_VECTOR_INDEX_NAME"
+  --kms-key-arn "$MEMORY_KMS_KEY_ARN"
+  --region "$REGION"
+)
+if [[ -n "$PROFILE" ]]; then
+  MEMORY_PROVISION_OPTIONS+=(--profile "$PROFILE")
+fi
+
+uv run --project "$MODULE_DIR" \
+  python "$MODULE_DIR/scripts/provision_memory_table.py" \
+  "${MEMORY_PROVISION_OPTIONS[@]}"
 
 echo "Uploading mortgage documents to s3://$BUCKET_NAME/"
 aws_cli s3 sync \
@@ -173,6 +194,9 @@ Lab 00 completed.
   Knowledge Base parameter: $KB_PARAMETER_NAME
   EKS cluster: $CLUSTER_NAME
   ECR repository: $REPOSITORY_URI
+  Memory table: $MEMORY_TABLE_NAME
+  Memory vector index: $MEMORY_VECTOR_INDEX_NAME
+  Memory embedding model: $MEMORY_EMBEDDING_MODEL_ID
 
 Continue with Lab 01:
   cd 01-test-knowledge-base

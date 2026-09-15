@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Mortgage assistant workshop infrastructure: Amazon Bedrock Knowledge Base
-  backed by OpenSearch Serverless, an EKS cluster, ECR, and EKS Pod Identity.
+  backed by OpenSearch Serverless, an EKS cluster, ECR, EKS Pod Identity,
+  and encrypted DynamoDB storage for agent sessions and semantic memory.
 
 Parameters:
   ProjectName:
@@ -51,6 +52,21 @@ Parameters:
   KnowledgeBaseParameterName:
     Type: String
     Default: /app/mortgage_assistant/kb_id
+  MemoryTableName:
+    Type: String
+    Default: mortgage-assistant-workshop-memory
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  MemoryVectorIndexName:
+    Type: String
+    Default: vector_index
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  MemoryEmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
 
 Resources:
   Vpc:
@@ -621,6 +637,28 @@ Resources:
             ]
           }
 
+  MemoryEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts ${MemoryTableName} for the mortgage assistant workshop"
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  MemoryEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-agent-memory"
+      TargetKeyId: !Ref MemoryEncryptionKey
+
   MortgageAssistantPodRole:
     Type: AWS::IAM::Role
     Properties:
@@ -655,6 +693,30 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
                   - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - Sid: ReadWriteAgentMemory
+                Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MemoryTableName}"
+              - Sid: SearchAgentMemory
+                Effect: Allow
+                Action: dynamodb:SearchVectors
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MemoryTableName}"
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MemoryTableName}/index/${MemoryVectorIndexName}"
+              - Sid: UseMemoryEncryptionKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                Resource: !GetAtt MemoryEncryptionKey.Arn
 
   MortgageAssistantPodIdentity:
     Type: AWS::EKS::PodIdentityAssociation
@@ -842,6 +904,16 @@ Outputs:
     Value: !GetAtt MortgageAssistantRepository.RepositoryUri
   AgentModelId:
     Value: !Ref AgentModelId
+  MemoryTableName:
+    Value: !Ref MemoryTableName
+  MemoryTableArn:
+    Value: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MemoryTableName}"
+  MemoryKmsKeyArn:
+    Value: !GetAtt MemoryEncryptionKey.Arn
+  MemoryVectorIndexName:
+    Value: !Ref MemoryVectorIndexName
+  MemoryEmbeddingModelId:
+    Value: !Ref MemoryEmbeddingModelId
   PodIdentityRoleArn:
     Value: !GetAtt MortgageAssistantPodRole.Arn
   AwsLoadBalancerControllerRoleArn:

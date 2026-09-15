@@ -5,17 +5,18 @@ Amazon Bedrock Knowledge Base and ending with a persistent Strands application
 running as an HTTP service on Amazon EKS.
 
 The numbered modules are complete checkpoints. Future modules can add
-short-term memory, long-term memory, observability, guardrails, and evaluations
+observability, guardrails, evaluations, and other production capabilities
 while continuing to update the same EKS application.
 
 ## Workshop modules
 
 | Lab | Module | Outcome |
 | --- | --- | --- |
-| 00 | `00-workshop-setup` | Deploy the shared Knowledge Base, EKS cluster, ECR repository, IAM roles, and load balancer controller. |
+| 00 | `00-workshop-setup` | Deploy all shared infrastructure, including the Knowledge Base, EKS, ECR, IAM, and DynamoDB memory storage. |
 | 01 | `01-test-knowledge-base` | Query the deployed Knowledge Base directly and inspect retrieved chunks. |
 | 02 | `02-local-strands` | Run the multi-agent Strands mortgage assistant on your laptop. |
 | 03 | `03-eks-service` | Deploy the assistant as a persistent FastAPI service on EKS and invoke it repeatedly. |
+| 04 | `04-memory` | Add DynamoDB-backed short-term sessions and semantic long-term memory. |
 
 ## Architecture
 
@@ -28,6 +29,9 @@ Lab 00 creates:
 - A two-AZ VPC with private EKS worker nodes.
 - An ECR repository and EKS Pod Identity role for the application.
 - AWS Load Balancer Controller support for an internet-facing Network Load Balancer.
+- A customer-managed KMS key and on-demand DynamoDB memory table.
+- A 1,024-dimension DynamoDB vector index for semantic memory.
+- TTL and point-in-time recovery for the shared memory table.
 
 Lab 03 adds:
 
@@ -35,6 +39,13 @@ Lab 03 adds:
 - A public NLB restricted to the participant's source CIDR.
 - A bearer-token protected `POST /invoke` endpoint.
 - Unauthenticated liveness and readiness endpoints.
+
+Lab 04 adds:
+
+- Strands `SnapshotSessionManager` for short-term conversation state.
+- Strands `MemoryManager` for durable mortgage preferences.
+- A client that automatically manages participant actor and session IDs.
+- A hydration utility for creating and clearing deterministic test memories.
 
 ## Prerequisites
 
@@ -67,7 +78,10 @@ Make the scripts executable:
 chmod +x \
   00-workshop-setup/scripts/deploy-infrastructure.sh \
   00-workshop-setup/scripts/cleanup.sh \
-  03-eks-service/scripts/deploy-application.sh
+  03-eks-service/scripts/deploy-application.sh \
+  04-memory/scripts/deploy-memory.sh \
+  04-memory/scripts/cleanup-memory.sh \
+  04-memory/scripts/hydrate_memory.py
 ```
 
 ## Lab 00: Deploy the shared infrastructure
@@ -90,10 +104,12 @@ To use a named profile:
 The script:
 
 1. Deploys the CloudFormation stack.
-2. Uploads the mortgage documents.
-3. Starts and waits for Knowledge Base ingestion.
-4. Configures the local `kubectl` context.
-5. Installs AWS Load Balancer Controller.
+2. Creates or validates the DynamoDB memory table and vector index.
+3. Enables memory-table TTL and point-in-time recovery.
+4. Uploads the mortgage documents.
+5. Starts and waits for Knowledge Base ingestion.
+6. Configures the local `kubectl` context.
+7. Installs AWS Load Balancer Controller.
 
 It does not build or deploy the mortgage application.
 
@@ -229,6 +245,71 @@ export MORTGAGE_API_KEY="$(
 )"
 ```
 
+## Lab 04: Add short-term and long-term memory
+
+Lab 04 follows the Strands DynamoDB Storage pattern. It updates the existing
+EKS application and uses one DynamoDB table for short-term session snapshots
+and semantic long-term memories. The table, vector index, KMS key, and IAM
+permissions were already provisioned in Lab 00. Lab 04 does not use AgentCore
+or create infrastructure.
+
+Deploy the memory-enabled application:
+
+```bash
+cd ../04-memory
+
+./scripts/deploy-memory.sh \
+  --region us-west-2
+```
+
+The client creates a stable actor ID from the participant's AWS account and
+stores the current session ID locally:
+
+```bash
+python3 app/invoke_eks.py \
+  --region us-west-2 \
+  --show-context
+```
+
+Test short-term memory in the current session:
+
+```bash
+python3 app/invoke_eks.py \
+  --region us-west-2 \
+  --prompt "I am considering a property worth 600,000 dollars."
+
+python3 app/invoke_eks.py \
+  --region us-west-2 \
+  --prompt "What property value did I mention?"
+```
+
+Save a durable preference and recall it from a new session:
+
+```bash
+python3 app/invoke_eks.py \
+  --region us-west-2 \
+  --prompt "Remember for future conversations that I prefer a 15-year fixed-rate mortgage."
+
+python3 app/invoke_eks.py \
+  --region us-west-2 \
+  --new-session \
+  --prompt "What kind of mortgage do I prefer?"
+```
+
+Alternatively, hydrate deterministic sample memories for the participant:
+
+```bash
+uv sync --frozen
+
+uv run scripts/hydrate_memory.py seed \
+  --region us-west-2 \
+  --replace
+```
+
+See [`04-memory/README.md`](04-memory/README.md) for the complete AWS
+Workshop-style walkthrough, including EKS restart, semantic retrieval,
+actor-isolation, inspection, troubleshooting, and cleanup exercises.
+
 ## Cleanup
 
 EKS nodes, NAT Gateway, OpenSearch Serverless, and the NLB incur charges while
@@ -241,13 +322,16 @@ cd ..
   --region us-west-2
 ```
 
-The cleanup script removes the Kubernetes service first, empties all S3 object
-versions, deletes CloudFormation, and handles residual EKS network interfaces
-or security groups if AWS reports a dependency failure.
+The cleanup script removes the Kubernetes service, deletes the shared DynamoDB
+memory table, empties all S3 object versions, deletes CloudFormation, and
+handles residual EKS network interfaces or security groups if AWS reports a
+dependency failure.
 
 ## Future modules
 
 Each new feature should be a numbered folder containing a complete application
-checkpoint, its incremental infrastructure, deployment instructions, test
-prompts, and expected results. Later modules should reuse the Lab 00 cluster and
-update the same `mortgage-assistant` Kubernetes Deployment.
+checkpoint, deployment instructions, test prompts, and expected results. Any
+AWS infrastructure required by a future module should be added to Lab 00 so it
+can be provisioned before accounts are handed to participants. Later modules
+reuse the Lab 00 cluster and update the same `mortgage-assistant` Kubernetes
+Deployment.

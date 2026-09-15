@@ -136,6 +136,11 @@ force_cleanup_vpc_dependencies() {
 BUCKET_NAME="$(stack_output KnowledgeBaseBucketName)"
 CLUSTER_NAME="$(stack_output EksClusterName)"
 VPC_ID="$(stack_output VpcId)"
+MEMORY_TABLE_NAME="$(stack_output MemoryTableName)"
+if [[ -z "$MEMORY_TABLE_NAME" || "$MEMORY_TABLE_NAME" == "None" ]]; then
+  MEMORY_TABLE_NAME="${STACK_NAME}-memory"
+fi
+LEGACY_MEMORY_STACK_NAME="${STACK_NAME}-memory"
 
 if [[ -n "$CLUSTER_NAME" && "$CLUSTER_NAME" != "None" ]] &&
   command -v kubectl >/dev/null 2>&1 &&
@@ -154,6 +159,32 @@ if [[ -n "$CLUSTER_NAME" && "$CLUSTER_NAME" != "None" ]] &&
       --wait \
       --timeout 10m || true
   fi
+fi
+
+if aws_cli cloudformation describe-stacks \
+  --stack-name "$LEGACY_MEMORY_STACK_NAME" >/dev/null 2>&1; then
+  STACK_MEMORY_TABLE_NAME="$(aws_cli cloudformation describe-stacks \
+    --stack-name "$LEGACY_MEMORY_STACK_NAME" \
+    --query "Stacks[0].Outputs[?OutputKey=='MemoryTableName'].OutputValue | [0]" \
+    --output text)"
+  if [[ -n "$STACK_MEMORY_TABLE_NAME" && "$STACK_MEMORY_TABLE_NAME" != "None" ]]; then
+    MEMORY_TABLE_NAME="$STACK_MEMORY_TABLE_NAME"
+  fi
+fi
+
+if aws_cli dynamodb describe-table \
+  --table-name "$MEMORY_TABLE_NAME" >/dev/null 2>&1; then
+  echo "Deleting shared DynamoDB memory table $MEMORY_TABLE_NAME"
+  aws_cli dynamodb delete-table --table-name "$MEMORY_TABLE_NAME" >/dev/null
+  aws_cli dynamodb wait table-not-exists --table-name "$MEMORY_TABLE_NAME"
+fi
+
+if aws_cli cloudformation describe-stacks \
+  --stack-name "$LEGACY_MEMORY_STACK_NAME" >/dev/null 2>&1; then
+  echo "Deleting legacy Lab 04 stack $LEGACY_MEMORY_STACK_NAME"
+  aws_cli cloudformation delete-stack --stack-name "$LEGACY_MEMORY_STACK_NAME"
+  aws_cli cloudformation wait stack-delete-complete \
+    --stack-name "$LEGACY_MEMORY_STACK_NAME"
 fi
 
 if [[ -n "$BUCKET_NAME" && "$BUCKET_NAME" != "None" ]]; then
