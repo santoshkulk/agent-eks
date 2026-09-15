@@ -1,0 +1,13 @@
+[project]
+name = "mortgage-workshop-lab-02"
+version = "0.1.0"
+description = "Run the Strands mortgage assistant locally"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40.0",
+    "strands-agents",
+    "strands-agents-tools==0.2.6",
+]
+
+[tool.uv]
+package = false

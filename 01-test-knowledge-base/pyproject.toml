@@ -1,0 +1,11 @@
+[project]
+name = "mortgage-workshop-lab-01"
+version = "0.1.0"
+description = "Test the deployed Amazon Bedrock Knowledge Base"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40.0",
+]
+
+[tool.uv]
+package = false
