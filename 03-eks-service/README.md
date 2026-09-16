@@ -298,6 +298,59 @@ individual users and authorize access to application data.
 Use only mock information in this workshop. Do not enter real customer,
 personal, account, or financial information.
 
+## TODO: Replace the shared API key with Amazon Cognito
+
+A future workshop revision should replace the shared bearer-token API key with
+participant authentication through an Amazon Cognito User Pool.
+
+The intended request flow is:
+
+```text
+Participant client
+        |
+        | Sign in with OAuth 2.0 authorization code and PKCE
+        v
+Amazon Cognito User Pool
+        |
+        | Cognito JWT access token
+        v
+Network Load Balancer
+        |
+        v
+FastAPI on EKS
+        |
+        | Validate JWT and derive participant identity
+        v
+Strands mortgage assistant
+```
+
+The implementation should:
+
+1. Add the Cognito User Pool, public application client, domain, and required
+   outputs to Lab 00.
+2. Configure the application client for authorization-code flow with PKCE so
+   the participant client does not contain an application-client secret.
+3. Update `app/invoke_eks.py` to sign in, obtain an access token, refresh it
+   when necessary, and send it as the bearer token.
+4. Update FastAPI to validate the JWT signature using the User Pool JWKS.
+5. Validate the token issuer, expiration, application client, scopes, and
+   `token_use=access` claim.
+6. Cache the Cognito signing keys while supporting signing-key rotation.
+7. Remove random API-key generation and the
+   `mortgage-assistant-api-key` Kubernetes Secret.
+8. Keep the liveness and readiness endpoints unauthenticated for Kubernetes
+   and Network Load Balancer health checks.
+9. In Lab 04, derive `actor_id` from the validated Cognito `sub` claim instead
+   of accepting an arbitrary actor ID from the request.
+10. Add tests for valid, expired, malformed, incorrectly scoped, and
+    incorrectly issued tokens.
+
+JWT validation inside FastAPI is the preferred approach for the current
+command-line client because it preserves the existing Network Load Balancer
+architecture. Switching to an Application Load Balancer with its built-in
+Cognito authentication action can be evaluated separately for a browser-based
+workshop interface.
+
 ## Prerequisites
 
 Complete Labs 00–02 and confirm your AWS identity:
