@@ -19,6 +19,8 @@ After completing this lab, you will be able to:
 - Recall a preference from a new conversation.
 - Verify that one actor cannot retrieve another actor's memories.
 - Inspect the DynamoDB records used by the agent.
+- Distinguish production-aligned design patterns from workshop simplifications.
+- Trace session restoration and memory retrieval across the complete EKS request path.
 
 ## Estimated time
 
@@ -27,32 +29,189 @@ exercises.
 
 ## Architecture
 
-```text
-Participant laptop
-        |
-        | prompt + actor_id + session_id
-        v
-Internet-facing NLB
-        |
-        v
-FastAPI service on EKS (two replicas)
-        |
-        v
-Strands supervisor agent
-   |                         |
-   | SnapshotSessionManager  | MemoryManager
-   v                         v
-Short-term snapshots      Semantic long-term memories
-   |                         |
-   +-------------+-----------+
-                 |
-                 v
-      One DynamoDB table and vector index
+Lab 04 keeps the same long-running FastAPI service and EKS routing model from
+Lab 03. It adds short-term and long-term storage components to every newly
+created supervisor agent.
+
+```mermaid
+flowchart TB
+    client["Participant laptop<br/>stateful Python client"]
+
+    subgraph account["Workshop AWS account"]
+        nlb["Internet-facing Network Load Balancer<br/>port 80 and source-CIDR filter"]
+
+        subgraph eks["Existing Amazon EKS cluster"]
+            controller["AWS Load Balancer Controller<br/>kube-system namespace"]
+            subgraph namespace["mortgage-assistant namespace"]
+                service["Kubernetes Service<br/>type: LoadBalancer"]
+                deployment["Kubernetes Deployment<br/>desired replicas: 2"]
+                secret["Kubernetes Secret<br/>workshop API key"]
+                serviceAccount["Kubernetes ServiceAccount<br/>mortgage-assistant"]
+
+                subgraph pod1["Memory-enabled application pod 1"]
+                    uvicorn1["Uvicorn HTTP server"] --> fastapi1["FastAPI application"]
+                    fastapi1 --> agent1["New Strands supervisor<br/>for each request"]
+                    agent1 --> session1["SnapshotSessionManager"]
+                    agent1 --> memory1["MemoryManager"]
+                end
+
+                subgraph pod2["Memory-enabled application pod 2"]
+                    uvicorn2["Uvicorn HTTP server"] --> fastapi2["FastAPI application"]
+                    fastapi2 --> agent2["New Strands supervisor<br/>for each request"]
+                    agent2 --> session2["SnapshotSessionManager"]
+                    agent2 --> memory2["MemoryManager"]
+                end
+
+                deployment -.->|creates and replaces| uvicorn1
+                deployment -.->|creates and replaces| uvicorn2
+                service -->|"route to a ready pod:8080"| uvicorn1
+                service -->|"route to a ready pod:8080"| uvicorn2
+                secret -.->|bearer key| fastapi1
+                secret -.->|bearer key| fastapi2
+                serviceAccount -.->|assigned to pod| uvicorn1
+                serviceAccount -.->|assigned to pod| uvicorn2
+            end
+        end
+
+        podIdentity["EKS Pod Identity association<br/>temporary IAM credentials"]
+        ssm["AWS Systems Manager Parameter Store<br/>Knowledge Base ID"]
+        model["Amazon Bedrock model"]
+        knowledgeBase["Amazon Bedrock Knowledge Base"]
+        embedding["Titan Text Embeddings V2"]
+
+        subgraph dynamodb["One DynamoDB memory table"]
+            sessions["Short-term session snapshots<br/>actor + session, seven-day TTL"]
+            memories["Durable actor memories<br/>no session TTL"]
+            vector["1,024-dimension vector index<br/>partitioned by actor"]
+            memories -.->|indexed by| vector
+        end
+    end
+
+    client -->|"prompt + actor_id + session_id"| nlb
+    controller -.->|provisions and configures| nlb
+    nlb --> service
+    serviceAccount -.-> podIdentity
+    podIdentity -.->|AWS SDK credentials| agent1
+    podIdentity -.->|AWS SDK credentials| agent2
+    session1 --> sessions
+    session2 --> sessions
+    memory1 --> embedding
+    memory2 --> embedding
+    memory1 --> memories
+    memory2 --> memories
+    memory1 --> vector
+    memory2 --> vector
+    agent1 --> ssm
+    agent2 --> ssm
+    agent1 --> model
+    agent2 --> model
+    agent1 --> knowledgeBase
+    agent2 --> knowledgeBase
 ```
 
-The existing Bedrock Knowledge Base and mortgage tools remain unchanged.
-Lab 04 updates the same `mortgage-assistant` Kubernetes Deployment and
-continues to use the same Network Load Balancer.
+The existing Bedrock Knowledge Base and mortgage tools remain unchanged. Lab
+04 updates the same `mortgage-assistant` Deployment and continues to use the
+same Network Load Balancer. Lab 00 owns the EKS cluster, DynamoDB table, vector
+index, KMS key, Pod Identity role, and other long-running infrastructure.
+
+### Where FastAPI sits in the memory-enabled service
+
+FastAPI still runs inside each application container between Uvicorn and the
+Strands application:
+
+```text
+EKS pod
+└── mortgage-assistant container
+    └── Uvicorn process
+        └── FastAPI application
+            └── newly created Strands supervisor
+                ├── SnapshotSessionManager
+                ├── MemoryManager
+                └── mortgage specialist tools
+```
+
+FastAPI remains long-running even though a new supervisor is created for every
+prompt. It authenticates the workshop request, validates `prompt`,
+`actor_id`, and `session_id`, invokes the agent, translates failures into an
+HTTP response, and exposes Kubernetes health endpoints.
+
+The actor and session values are part of the Lab 04 API because they select the
+DynamoDB namespace to restore. This is suitable for the isolated workshop, but
+a production service must derive the actor from authenticated identity rather
+than trusting a caller-provided value.
+
+### End-to-end memory invocation workflow
+
+The workflow below shows a request that may restore short-term state, search
+long-term memory, call a mortgage tool, and save updated state. Memory search
+and durable memory creation happen only when the supervisor selects those
+capabilities.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Participant
+    participant NLB as Network Load Balancer
+    participant Service as Kubernetes Service
+    participant API as FastAPI in one ready pod
+    participant Agent as New Strands supervisor
+    participant Session as SnapshotSessionManager
+    participant Memory as MemoryManager
+    participant Embed as Titan embeddings
+    participant DDB as DynamoDB table and vector index
+    participant Model as Amazon Bedrock model
+    participant KB as Bedrock Knowledge Base or mortgage tool
+
+    Participant->>NLB: POST /invoke with prompt, actor_id, session_id, and token
+    NLB->>Service: Forward traffic allowed by source CIDR
+    Service->>API: Route to one ready pod on port 8080
+    API->>API: Authenticate and validate request fields
+    API->>Agent: Create supervisor for actor and session
+    Agent->>Session: Initialize the session manager
+    Session->>DDB: Read the actor/session snapshot
+    DDB-->>Session: Return prior conversation or no snapshot
+    Session-->>Agent: Restore short-term conversation state
+    Agent->>Model: Process prompt with restored context
+    Model-->>Agent: Return response or select a capability
+
+    opt Supervisor searches durable memory
+        Agent->>Memory: search_memory(current request)
+        Memory->>Embed: Embed the semantic query
+        Embed-->>Memory: Return 1,024-dimension vector
+        Memory->>DDB: Vector search within the actor partition
+        DDB-->>Memory: Return relevant durable preferences
+        Memory-->>Agent: Add relevant memories to the reasoning context
+        Agent->>Model: Continue with retrieved memory
+        Model-->>Agent: Return next response or tool selection
+    end
+
+    opt Supervisor needs mortgage information or a calculation
+        Agent->>KB: Invoke the selected specialist, Knowledge Base, or tool
+        KB-->>Agent: Return grounded information or tool result
+        Agent->>Model: Compose the user-facing answer
+        Model-->>Agent: Return final answer
+    end
+
+    opt User asks to save a permitted durable preference
+        Agent->>Memory: add_memory(validated preference)
+        Memory->>Embed: Embed the preference
+        Embed-->>Memory: Return memory vector
+        Memory->>DDB: Write durable actor memory and vector
+        DDB-->>Memory: Confirm write
+    end
+
+    Agent->>Session: Persist the updated conversation snapshot
+    Session->>DDB: Write short-term actor/session state with TTL
+    DDB-->>Session: Confirm write
+    Agent-->>API: Response text
+    API-->>Service: JSON response with IDs and duration
+    Service-->>NLB: Return HTTP response
+    NLB-->>Participant: Return result
+```
+
+A later prompt can be routed to either replica. The selected pod creates a new
+agent and restores the same session and actor memory from DynamoDB, so pod
+replacement and rolling deployment do not erase the conversation.
 
 ## Memory concepts
 
@@ -740,22 +899,106 @@ kubectl logs \
   --tail=200
 ```
 
-## Production considerations
+## Production-aligned patterns demonstrated by this lab
 
-This lab intentionally keeps identity and operations simple. For a production
-application:
+Production readiness is an end-to-end property of the application,
+infrastructure, operational processes, and security controls. This workshop is
+not a production deployment, but it demonstrates several patterns that are
+appropriate foundations for one.
 
-- Derive actor IDs from authenticated identities.
-- Enforce authorization before accepting an actor namespace.
-- Define retention and deletion workflows for both sessions and memories.
-- Add user-visible memory review and deletion controls.
-- Treat prompt and session records as potentially sensitive data.
-- Add monitoring for throttling, failed writes, vector-search latency, and
-  Bedrock embedding errors.
-- Review table partition size and traffic distribution.
-- Consider S3 offload for session snapshots approaching DynamoDB's item-size
-  limit.
-- Test concurrent requests against the same session.
+### Create an agent for each request
+
+Every `/invoke` request creates a new supervisor `Agent`. The agent object is
+not shared between concurrent requests, actors, or EKS replicas. The new agent
+receives a `SnapshotSessionManager` and `MemoryManager` for the request's
+actor and session, restores its state from DynamoDB, processes the prompt, and
+persists the updated state.
+
+```text
+HTTP request
+    |
+    v
+Create supervisor agent
+    |
+    +-- restore session from DynamoDB
+    +-- retrieve relevant durable memories
+    +-- process the prompt
+    +-- persist updated state
+    |
+    v
+Discard the in-process agent object
+```
+
+This keeps the application pods stateless. A subsequent prompt can be processed
+by either EKS replica, including after a pod replacement or rolling deployment.
+Creating a new Python agent object does not rebuild or redeploy the container
+image.
+
+### Externalize conversation state
+
+Short-term state and durable memory are stored outside the pods. Session
+snapshots use a configurable TTL, while durable preferences remain until an
+explicit deletion workflow removes them. Actor prefixes and vector-search
+partition filters separate memory namespaces in application code.
+
+### Use managed data-protection controls
+
+Lab 00 configures DynamoDB on-demand capacity, encryption with a
+customer-managed KMS key, point-in-time recovery, TTL, and a partition-scoped
+vector index. These are useful production building blocks, although retention,
+backup, restore, and deletion procedures must still be defined and tested.
+
+### Use workload identity instead of static AWS keys
+
+EKS pods obtain AWS permissions through EKS Pod Identity. AWS access keys are
+not stored in the image or Kubernetes manifests, and the pod role is scoped to
+the workshop resources required by the application.
+
+### Apply container and Kubernetes safety controls
+
+The deployment provides two replicas, rolling updates, health probes, a Pod
+Disruption Budget, resource requests and limits, a non-root user, a read-only
+root filesystem, dropped Linux capabilities, seccomp, restricted Pod Security
+labels, and bounded Uvicorn concurrency.
+
+These controls improve isolation and availability, but do not replace capacity
+testing, autoscaling, multi-AZ scheduling, or a formal security review.
+
+### Validate inputs and pin dependencies
+
+The API validates prompt length and identifier format, returns a request ID,
+and avoids returning raw exception details. Dependencies are captured in
+`uv.lock`, and tests cover identifiers, client session selection, TTL
+separation, and the API contract.
+
+## What is still missing for production and how to address it
+
+The following controls are intentionally outside the scope of this workshop.
+
+| Workshop implementation | Production concern | Recommended solution |
+|---|---|---|
+| One shared bearer API key | It does not provide individual identity, token expiry, or per-user authorization. | Use Amazon Cognito or another OIDC provider. Validate JWT signature, issuer, audience, and expiry. |
+| The request accepts `actor_id` | A caller with the API key can select another actor's namespace. Prefix filtering is not authorization. | Remove caller-controlled actor selection from the public API and derive the actor from the authenticated token's immutable `sub` claim. |
+| Internet-facing HTTP NLB | Prompts and credentials lack transport encryption, and the NLB does not provide application-layer WAF controls. | Terminate TLS with ACM. Use an ALB, API Gateway, or suitable ingress when OIDC, AWS WAF, quotas, or application routing are required. Consider a private endpoint for internal applications. |
+| No same-session concurrency control | Two prompts can read the same snapshot and persist conflicting updates. | Serialize requests by session, use a short-lived distributed lock, or add versioned conditional writes with conflict detection and bounded retry. |
+| No client idempotency key | A network retry can execute a tool or save a memory more than once. | Require an idempotency key for mutating requests, persist its result with a TTL, and make tool operations idempotent where possible. |
+| Direct Bedrock and DynamoDB calls | Throttling or transient failures can fail the entire request. | Add explicit timeouts, bounded retries with exponential backoff and jitter, retry budgets, and circuit breaking. Never retry non-idempotent tools blindly. |
+| `strands-dynamodb-storage==0.1.2` | An early-version dependency needs additional compatibility, load, and failure-mode assessment before handling production data. | Review its release and support posture, pin an approved version, test recovery and scale, and retain an application-owned storage interface so the implementation can be upgraded or replaced. |
+| The model decides when to save memory | Prompt injection or model error could store incorrect, duplicate, or sensitive content. | Put a deterministic policy layer in front of storage. Validate, redact, classify, deduplicate, and authorize proposed memories; require confirmation where appropriate. |
+| Prompt-only safety policy | Instructions alone are not a security boundary. | Add Bedrock Guardrails where appropriate, strict tool schemas, tool allowlists, retrieval-source controls, input/output validation, adversarial tests, and least-privilege tool permissions. |
+| Prompts and memories may contain sensitive data | Durable storage creates privacy, regulatory, retention, and deletion obligations. | Minimize collection, classify data, redact logs and traces, define retention and residency, and provide memory review, correction, export, and deletion workflows. |
+| No OpenTelemetry export or operational alarms | Operators cannot trace requests across FastAPI, Strands, Bedrock, tools, and DynamoDB or detect degradation promptly. | Export OpenTelemetry traces, metrics, and selected logs to CloudWatch. Alarm on latency, errors, throttling, failed writes, token usage, and vector-search failures. |
+| Fixed two replicas and no HPA | Capacity does not follow traffic, latency, or downstream model-call concurrency. | Load test the complete path, configure autoscaling, spread replicas across Availability Zones, validate node and Bedrock quotas, and add rate limits and backpressure. |
+| One Uvicorn worker with concurrency limited to four per pod | The workshop limit may be too low for production, while increasing it without testing can exhaust memory or service quotas. | Benchmark memory and latency, then tune workers, replicas, concurrency, connection pools, and Bedrock quotas together. Queue long-running asynchronous work. |
+| Session growth is not managed | Long conversations can become expensive or approach DynamoDB item-size limits. | Monitor snapshot size, compact or summarize old turns, cap conversation length, and offload large encrypted payloads to Amazon S3 when supported by the storage design. |
+| Vector-index updates are eventually consistent | A newly stored preference may not be immediately searchable. | Retain new memory in the active session and use bounded retry or an exact-read fallback when immediate confirmation is required. |
+| No tested disaster-recovery procedure | Point-in-time recovery alone does not demonstrate that recovery objectives can be met. | Define RTO and RPO, regularly test table and KMS recovery, document regional dependencies, and add multi-Region recovery if required. |
+| Deployment runs from a participant laptop | There is no controlled promotion, provenance, approval, or automated rollback process. | Use CI/CD with reviewed changes, automated tests and evaluations, image scanning and signing, immutable image digests, staged rollout, and rollback criteria. |
+| Unit tests do not exercise AWS or production load | They cannot detect IAM, quota, race, retrieval-quality, model-behaviour, or integration regressions. | Add integration, concurrency, failure-injection, load, security, and recovery tests plus versioned evaluations for grounding, safety, latency, quality, and cost. |
+
+Before using this design for real mortgage information, complete formal
+security, privacy, reliability, model-risk, and operational-readiness reviews.
+Use mock or synthetic data until those controls are implemented.
 
 ## Cleanup
 

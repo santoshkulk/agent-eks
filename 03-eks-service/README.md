@@ -23,6 +23,8 @@ After completing this lab, you will be able to:
 - Use EKS Pod Identity to give the application access to AWS services.
 - Send repeated prompts without rebuilding or redeploying the application.
 - Inspect pods, logs, health checks, rollouts, and service configuration.
+- Trace an invocation from the client through FastAPI and the Strands agent.
+- Identify which parts are production-aligned and which require further hardening.
 
 ## Estimated time
 
@@ -31,34 +33,66 @@ container build, EKS deployment, and validation exercises.
 
 ## Architecture
 
-```text
-Participant laptop
-        |
-        | HTTP POST /invoke
-        | Authorization: Bearer <API key>
-        v
-Internet-facing Network Load Balancer
-        |
-        | source CIDR restricted
-        v
-Kubernetes Service
-        |
-        +-------------------------+
-        |                         |
-        v                         v
-FastAPI pod 1                 FastAPI pod 2
-        |                         |
-        +------------+------------+
-                     |
-                     v
-             Strands supervisor
-                 |    |    |
-                 v    v    v
-          General  Existing  Application
-          mortgage mortgage  assistants
-                 |
-                 v
-       Amazon Bedrock Knowledge Base
+The following diagram shows the infrastructure boundary and what runs inside
+each application pod.
+
+```mermaid
+flowchart TB
+    client["Participant laptop<br/>Python client or curl"]
+
+    subgraph account["Workshop AWS account"]
+        nlb["Internet-facing Network Load Balancer<br/>port 80 and source-CIDR filter"]
+
+        subgraph eks["Existing Amazon EKS cluster"]
+            controller["AWS Load Balancer Controller<br/>kube-system namespace"]
+            subgraph namespace["mortgage-assistant namespace"]
+                service["Kubernetes Service<br/>type: LoadBalancer"]
+                deployment["Kubernetes Deployment<br/>desired replicas: 2"]
+                secret["Kubernetes Secret<br/>workshop API key"]
+                serviceAccount["Kubernetes ServiceAccount<br/>mortgage-assistant"]
+
+                subgraph pod1["Application pod 1"]
+                    uvicorn1["Uvicorn HTTP server"] --> fastapi1["FastAPI application"]
+                    fastapi1 --> strands1["Strands supervisor<br/>and specialist agents"]
+                end
+
+                subgraph pod2["Application pod 2"]
+                    uvicorn2["Uvicorn HTTP server"] --> fastapi2["FastAPI application"]
+                    fastapi2 --> strands2["Strands supervisor<br/>and specialist agents"]
+                end
+
+                deployment -.->|creates and replaces| uvicorn1
+                deployment -.->|creates and replaces| uvicorn2
+                service -->|"route to a ready pod:8080"| uvicorn1
+                service -->|"route to a ready pod:8080"| uvicorn2
+                secret -.->|bearer key| fastapi1
+                secret -.->|bearer key| fastapi2
+                serviceAccount -.->|assigned to pod| uvicorn1
+                serviceAccount -.->|assigned to pod| uvicorn2
+            end
+        end
+
+        podIdentity["EKS Pod Identity association<br/>temporary IAM credentials"]
+        ssm["AWS Systems Manager Parameter Store<br/>Knowledge Base ID"]
+        model["Amazon Bedrock model"]
+        knowledgeBase["Amazon Bedrock Knowledge Base"]
+        ecr["Amazon ECR<br/>immutable container images"]
+    end
+
+    client -->|"POST /invoke + bearer token"| nlb
+    controller -.->|provisions and configures| nlb
+    nlb --> service
+    ecr -.->|node pulls image| uvicorn1
+    ecr -.->|node pulls image| uvicorn2
+    serviceAccount -.-> podIdentity
+    podIdentity -.->|AWS SDK credentials| strands1
+    podIdentity -.->|AWS SDK credentials| strands2
+    strands1 --> ssm
+    strands2 --> ssm
+    strands1 --> model
+    strands2 --> model
+    strands1 --> knowledgeBase
+    strands2 --> knowledgeBase
 ```
 
 Lab 00 already provisioned the long-running AWS infrastructure:
@@ -71,8 +105,90 @@ Lab 00 already provisioned the long-running AWS infrastructure:
 - The application EKS Pod Identity role.
 - AWS Load Balancer Controller.
 
-Lab 03 deploys application resources into that existing environment. It does
-not create a new EKS cluster or Knowledge Base.
+Lab 03 builds and deploys the application resources into that environment. It
+does not create a new EKS cluster or Knowledge Base.
+
+### Where FastAPI sits and why it is used
+
+FastAPI runs inside every application container. It is not a separate EKS
+service, sidecar, or managed AWS component. Uvicorn is the long-running server
+process in the container, FastAPI implements the HTTP boundary, and the Strands
+application is called as ordinary Python code inside the same process.
+
+```text
+EKS pod
+└── mortgage-assistant container
+    └── Uvicorn process
+        └── FastAPI application
+            └── Strands supervisor and tools
+```
+
+EKS schedules and replaces containers, but it does not define an application
+API. FastAPI provides that missing application layer:
+
+- A stable `POST /invoke` endpoint for clients.
+- JSON request parsing and schema validation.
+- Bearer-token enforcement for workshop invocations.
+- Consistent status codes and response bodies.
+- Request IDs, timing, and centralized exception handling.
+- Liveness and readiness endpoints for Kubernetes and the load balancer.
+- A long-running process that can accept many prompts after one deployment.
+
+FastAPI itself is not required by Strands; another HTTP or RPC framework could
+be used. It is required by this implementation because it is the selected
+adapter between external network requests and the Python agent application.
+
+### End-to-end invocation workflow
+
+Only one ready pod handles a particular request. The next request may be routed
+to the same pod or the other replica because Lab 03 stores no conversation
+state in either pod.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Participant
+    participant NLB as Network Load Balancer
+    participant Service as Kubernetes Service
+    participant API as FastAPI in one ready pod
+    participant Agent as Strands supervisor
+    participant Model as Amazon Bedrock model
+    participant Tool as Selected specialist/tool
+    participant KB as Bedrock Knowledge Base
+
+    Participant->>NLB: POST /invoke with JSON prompt and bearer token
+    NLB->>Service: Forward traffic allowed by source CIDR
+    Service->>API: Route to one ready pod on port 8080
+    API->>API: Validate token and request body
+    API->>API: Create request ID and start timer
+    API->>Agent: run_prompt(prompt)
+    Note over API,Agent: A new in-process supervisor is created for this request
+    Agent->>Model: Ask model to interpret and route the prompt
+    Model-->>Agent: Return response or tool selection
+
+    alt General mortgage question
+        Agent->>Tool: Call general mortgage assistant
+        Tool->>KB: Retrieve grounded workshop content
+        KB-->>Tool: Return relevant passages
+        Tool->>Model: Generate an answer from retrieved content
+        Model-->>Tool: Return grounded answer
+        Tool-->>Agent: Return tool result
+    else Existing mortgage, application, or calculation
+        Agent->>Tool: Call the selected mock-data tool or calculator
+        Tool-->>Agent: Return tool result
+    end
+
+    Agent->>Model: Compose the final response when required
+    Model-->>Agent: Final mortgage-assistant response
+    Agent-->>API: Response text
+    API-->>Service: JSON response with request ID and duration
+    Service-->>NLB: Return HTTP response
+    NLB-->>Participant: Return result
+```
+
+Temporary AWS credentials are supplied to the pod through EKS Pod Identity.
+The readiness path also reads the Knowledge Base identifier from SSM. Normal
+prompts do not run Docker, push an image, or modify the EKS Deployment.
 
 ## Service concepts
 
@@ -1187,27 +1303,74 @@ python3 app/invoke_eks.py \
   --prompt "Explain the tradeoffs between 15-year and 30-year mortgages."
 ```
 
-## Production considerations
+## Production-aligned patterns demonstrated by this lab
 
-This lab intentionally uses a simple workshop deployment. For a production
-service:
+The complete workshop service is not production-ready, but it demonstrates
+several useful production patterns.
 
-- Terminate TLS and require HTTPS.
-- Use an identity provider instead of one shared API key.
-- Derive authorization from authenticated user identity.
-- Consider a private load balancer or API gateway according to access needs.
-- Store and rotate secrets with a managed secrets service.
-- Add request rate limits and abuse controls.
-- Add Horizontal Pod Autoscaler configuration.
-- Tune Uvicorn concurrency and resource limits using load tests.
-- Add structured logs, metrics, distributed traces, dashboards, and alarms.
-- Add request cancellation and graceful timeout handling.
-- Add retry and backoff policies for AWS service calls.
-- Define deployment health gates and rollback automation.
-- Scan images and dependencies continuously.
-- Pin and regularly update application dependencies.
-- Add session and durable memory only with explicit identity and retention
-  controls.
+### Long-running, stateless application service
+
+The container is deployed once and remains available for many requests. Each
+invocation creates an isolated Strands supervisor, while no conversation state
+is retained in the pod. This lets the Kubernetes Service route requests to any
+ready replica and makes pod replacement straightforward.
+
+### Availability and safe rollout controls
+
+The Deployment uses two replicas, readiness and liveness probes, a rolling
+update with `maxUnavailable: 0`, and a Pod Disruption Budget. Kubernetes can
+start a replacement before intentionally removing an existing ready replica.
+
+### Workload identity and least-privilege direction
+
+EKS Pod Identity supplies temporary AWS credentials through the pod's service
+account. The image and Kubernetes manifests do not contain long-lived AWS
+access keys.
+
+### Hardened container execution
+
+The application runs as a non-root user with a read-only root filesystem,
+dropped Linux capabilities, disabled privilege escalation, seccomp, a bounded
+writable `/tmp` volume, resource requests and limits, and restricted Pod
+Security admission labels.
+
+### Repeatable artifacts and deployment
+
+Dependencies are locked, images receive immutable timestamped tags, ECR stores
+the build artifact, and Kubernetes performs a declarative rollout. Health and
+smoke checks run before the deployment script reports success.
+
+### Explicit API boundary
+
+FastAPI provides validated input and output schemas, request identifiers,
+health endpoints, authentication enforcement, and a consistent place for
+future authorization, telemetry, rate limiting, and policy controls.
+
+## What is still missing for production and how to address it
+
+| Workshop implementation | Production concern | Recommended solution |
+|---|---|---|
+| One shared API key | It cannot identify individual users or express per-user permissions. | Use Amazon Cognito or another OIDC provider. Validate JWT signature, issuer, audience, expiry, token use, and scopes. |
+| Internet-facing HTTP NLB | Traffic and the bearer credential are not encrypted in transit, and the NLB has no application-layer WAF policy. | Require HTTPS with an ACM certificate. Select ALB, API Gateway, ingress, or a private load balancer according to authentication, AWS WAF, routing, and access requirements. |
+| API key stored in a Kubernetes Secret | Kubernetes Secrets are not a complete secret lifecycle or rotation solution. | Prefer short-lived identity tokens. Store remaining secrets in AWS Secrets Manager, enable envelope encryption, restrict access, and automate rotation. |
+| Source-IP filtering is the primary network restriction | Participant IP addresses change, proxies can share addresses, and CIDRs do not represent user identity. | Use identity-based authorization, private networking where appropriate, security-group controls, and application-layer policy. Treat CIDR filtering as defense in depth. |
+| No rate limiting or admission control | A client can exhaust pod concurrency or Bedrock quotas. | Add per-identity quotas, request-size limits, rate limiting, backpressure, and bounded queues. Coordinate limits with downstream AWS quotas. |
+| Fixed two replicas and no HPA | Capacity does not adjust to traffic, latency, or model-call concurrency. | Load test the complete path, configure a Horizontal Pod Autoscaler, validate cluster capacity, and use suitable metrics such as active requests and latency. |
+| Replicas are not explicitly spread | Both pods could be scheduled onto the same node or Availability Zone. | Add topology-spread constraints and pod anti-affinity, use multi-AZ node groups, and test node and AZ disruption. |
+| One Uvicorn worker and four concurrent requests per pod | The workshop setting may underutilize or overload resources under different model latency and memory profiles. | Benchmark CPU, memory, connection use, and downstream quotas; then tune workers, replicas, concurrency, timeouts, and resource limits together. |
+| Synchronous request waits for the complete agent response | Long model or tool calls can exceed client, proxy, or load-balancer timeouts. | Add end-to-end timeout budgets and cancellation. Use streaming for interactive responses or an asynchronous job API for long-running workflows. |
+| No client idempotency key | Retried requests could repeat side-effecting tools added in a future implementation. | Require idempotency keys for mutating operations, persist results with TTL, and design tools to be idempotent. |
+| AWS calls rely mainly on SDK defaults | Throttling or transient errors may fail requests unpredictably. | Configure explicit connection and operation timeouts, bounded exponential backoff with jitter, retry budgets, and circuit breaking. Do not blindly retry side effects. |
+| Prompt instructions are the main model safety control | Prompt injection, unsupported claims, or unsafe tool arguments can bypass intended behavior. | Add Bedrock Guardrails where appropriate, strict tool schemas, tool authorization, input/output validation, retrieval-source controls, and adversarial evaluations. |
+| Application logs remain in pod output only | Operators lack end-to-end traces, service-level metrics, retention policy, and actionable alarms. | Export structured logs, OpenTelemetry traces, and metrics to CloudWatch. Correlate request and trace IDs and alarm on latency, errors, throttling, saturation, token use, and cost. |
+| Deployment runs from a participant laptop | There is no controlled promotion, approval, provenance, automated security gate, or rollback policy. | Use CI/CD with tests and model evaluations, image scanning and signing, software bills of materials, immutable image digests, staged rollout, and automated rollback criteria. |
+| Tests are primarily local and functional | They do not establish production scale, resilience, security, or model quality. | Add integration, contract, load, soak, failure-injection, security, and recovery tests plus versioned evaluations for grounding, accuracy, safety, latency, and cost. |
+| No formal recovery and dependency plan | EKS, ECR, SSM, Bedrock, the Knowledge Base, and networking have different failure and recovery characteristics. | Define service-level objectives, RTO and RPO, dependency failure behavior, regional recovery, runbooks, game days, and tested rollback procedures. |
+| Stateless requests have no user conversation context | This is safe for routing but cannot support continuity or personalized memory. | Add state only after authenticated identity, authorization, concurrency, privacy, retention, and deletion controls are designed. Lab 04 demonstrates the workshop memory pattern. |
+
+Before accepting real mortgage information, complete formal security, privacy,
+reliability, model-risk, and operational-readiness reviews. Continue using mock
+or synthetic information until those controls are implemented.
 
 ## Cleanup
 
