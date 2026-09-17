@@ -146,44 +146,43 @@ state in either pod.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor Participant
-    participant NLB as Network Load Balancer
-    participant Service as Kubernetes Service
-    participant API as FastAPI in one ready pod
-    participant Agent as Strands supervisor
-    participant Model as Amazon Bedrock model
-    participant Tool as Selected specialist/tool
-    participant KB as Bedrock Knowledge Base
+    actor User
+    participant NLB
+    participant K8s
+    participant API
+    participant Agent
+    participant Bedrock
+    participant Tools
+    participant KB
 
-    Participant->>NLB: POST /invoke with JSON prompt and bearer token
-    NLB->>Service: Forward traffic allowed by source CIDR
-    Service->>API: Route to one ready pod on port 8080
+    User->>NLB: Submit prompt and bearer token
+    NLB->>K8s: Forward allowed request
+    K8s->>API: Route to one ready pod
     API->>API: Validate token and request body
     API->>API: Create request ID and start timer
-    API->>Agent: run_prompt(prompt)
-    Note over API,Agent: A new in-process supervisor is created for this request
-    Agent->>Model: Ask model to interpret and route the prompt
-    Model-->>Agent: Return response or tool selection
+    API->>Agent: Run prompt
+    Note over API,Agent: Create a new supervisor for this request
+    Agent->>Bedrock: Interpret and route prompt
+    Bedrock-->>Agent: Return response or tool choice
 
     alt General mortgage question
-        Agent->>Tool: Call general mortgage assistant
-        Tool->>KB: Retrieve grounded workshop content
-        KB-->>Tool: Return relevant passages
-        Tool->>Model: Generate an answer from retrieved content
-        Model-->>Tool: Return grounded answer
-        Tool-->>Agent: Return tool result
-    else Existing mortgage, application, or calculation
-        Agent->>Tool: Call the selected mock-data tool or calculator
-        Tool-->>Agent: Return tool result
+        Agent->>Tools: Call general mortgage specialist
+        Tools->>KB: Retrieve grounded workshop content
+        KB-->>Tools: Return relevant passages
+        Tools->>Bedrock: Generate answer from retrieved content
+        Bedrock-->>Tools: Return grounded answer
+        Tools-->>Agent: Return tool result
+    else Existing mortgage application or calculation
+        Agent->>Tools: Call selected mock data tool or calculator
+        Tools-->>Agent: Return tool result
     end
 
-    Agent->>Model: Compose the final response when required
-    Model-->>Agent: Final mortgage-assistant response
-    Agent-->>API: Response text
-    API-->>Service: JSON response with request ID and duration
-    Service-->>NLB: Return HTTP response
-    NLB-->>Participant: Return result
+    Agent->>Bedrock: Compose final response when needed
+    Bedrock-->>Agent: Return final answer
+    Agent-->>API: Return response text
+    API-->>K8s: Return JSON response
+    K8s-->>NLB: Return HTTP response
+    NLB-->>User: Return result
 ```
 
 Temporary AWS credentials are supplied to the pod through EKS Pod Identity.

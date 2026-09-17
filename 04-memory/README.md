@@ -149,64 +149,63 @@ capabilities.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor Participant
-    participant NLB as Network Load Balancer
-    participant Service as Kubernetes Service
-    participant API as FastAPI in one ready pod
-    participant Agent as New Strands supervisor
-    participant Session as SnapshotSessionManager
-    participant Memory as MemoryManager
-    participant Embed as Titan embeddings
-    participant DDB as DynamoDB table and vector index
-    participant Model as Amazon Bedrock model
-    participant KB as Bedrock Knowledge Base or mortgage tool
+    actor User
+    participant NLB
+    participant K8s
+    participant API
+    participant Agent
+    participant Session
+    participant Memory
+    participant Embed
+    participant DDB
+    participant Bedrock
+    participant Tools
 
-    Participant->>NLB: POST /invoke with prompt, actor_id, session_id, and token
-    NLB->>Service: Forward traffic allowed by source CIDR
-    Service->>API: Route to one ready pod on port 8080
-    API->>API: Authenticate and validate request fields
+    User->>NLB: Submit prompt with actor and session IDs
+    NLB->>K8s: Forward allowed request
+    K8s->>API: Route to one ready pod
+    API->>API: Authenticate and validate request
     API->>Agent: Create supervisor for actor and session
-    Agent->>Session: Initialize the session manager
-    Session->>DDB: Read the actor/session snapshot
-    DDB-->>Session: Return prior conversation or no snapshot
-    Session-->>Agent: Restore short-term conversation state
-    Agent->>Model: Process prompt with restored context
-    Model-->>Agent: Return response or select a capability
+    Agent->>Session: Initialize session manager
+    Session->>DDB: Read actor and session snapshot
+    DDB-->>Session: Return prior conversation or empty state
+    Session-->>Agent: Restore short term context
+    Agent->>Bedrock: Process prompt with restored context
+    Bedrock-->>Agent: Return response or capability choice
 
-    opt Supervisor searches durable memory
-        Agent->>Memory: search_memory(current request)
-        Memory->>Embed: Embed the semantic query
-        Embed-->>Memory: Return 1,024-dimension vector
-        Memory->>DDB: Vector search within the actor partition
-        DDB-->>Memory: Return relevant durable preferences
-        Memory-->>Agent: Add relevant memories to the reasoning context
-        Agent->>Model: Continue with retrieved memory
-        Model-->>Agent: Return next response or tool selection
+    opt Search durable memory
+        Agent->>Memory: Search memory for current request
+        Memory->>Embed: Embed semantic query
+        Embed-->>Memory: Return vector
+        Memory->>DDB: Search vector index for actor
+        DDB-->>Memory: Return relevant preferences
+        Memory-->>Agent: Add memories to context
+        Agent->>Bedrock: Continue with retrieved memory
+        Bedrock-->>Agent: Return next response or tool choice
     end
 
-    opt Supervisor needs mortgage information or a calculation
-        Agent->>KB: Invoke the selected specialist, Knowledge Base, or tool
-        KB-->>Agent: Return grounded information or tool result
-        Agent->>Model: Compose the user-facing answer
-        Model-->>Agent: Return final answer
+    opt Use mortgage knowledge or a calculation
+        Agent->>Tools: Invoke selected specialist or tool
+        Tools-->>Agent: Return grounded result
+        Agent->>Bedrock: Compose user response
+        Bedrock-->>Agent: Return final answer
     end
 
-    opt User asks to save a permitted durable preference
-        Agent->>Memory: add_memory(validated preference)
-        Memory->>Embed: Embed the preference
-        Embed-->>Memory: Return memory vector
-        Memory->>DDB: Write durable actor memory and vector
+    opt Save a permitted preference
+        Agent->>Memory: Save approved preference
+        Memory->>Embed: Embed preference
+        Embed-->>Memory: Return vector
+        Memory->>DDB: Write durable memory and vector
         DDB-->>Memory: Confirm write
     end
 
-    Agent->>Session: Persist the updated conversation snapshot
-    Session->>DDB: Write short-term actor/session state with TTL
+    Agent->>Session: Persist updated conversation
+    Session->>DDB: Write session state with TTL
     DDB-->>Session: Confirm write
-    Agent-->>API: Response text
-    API-->>Service: JSON response with IDs and duration
-    Service-->>NLB: Return HTTP response
-    NLB-->>Participant: Return result
+    Agent-->>API: Return response text
+    API-->>K8s: Return JSON response
+    K8s-->>NLB: Return HTTP response
+    NLB-->>User: Return result
 ```
 
 A later prompt can be routed to either replica. The selected pod creates a new
