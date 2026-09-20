@@ -38,7 +38,7 @@ each application pod.
 
 ```mermaid
 flowchart TB
-    client["Participant laptop<br/>Python client or curl"]
+    client["Workshop Studio Code Editor<br/>Python client or curl"]
 
     subgraph account["Workshop AWS account"]
         nlb["Internet-facing Network Load Balancer<br/>port 80 and source-CIDR filter"]
@@ -95,7 +95,8 @@ flowchart TB
     strands2 --> knowledgeBase
 ```
 
-Lab 00 already provisioned the long-running AWS infrastructure:
+Workshop Studio pre-provisions the long-running AWS infrastructure before the
+lab begins:
 
 - The VPC and EKS cluster.
 - The EKS managed node group.
@@ -105,8 +106,9 @@ Lab 00 already provisioned the long-running AWS infrastructure:
 - The application EKS Pod Identity role.
 - AWS Load Balancer Controller.
 
-Lab 03 builds and deploys the application resources into that environment. It
-does not create a new EKS cluster or Knowledge Base.
+Participants must not run `00-workshop-setup`. Lab 03 builds and deploys the
+application resources into the Workshop Studio environment. It does not create
+a new EKS cluster or Knowledge Base.
 
 ### Where FastAPI sits and why it is used
 
@@ -297,7 +299,7 @@ The supervisor routes prompts to specialized tools:
 
 The general mortgage assistant uses the Bedrock Knowledge Base. At runtime,
 `get_knowledge_base_id()` reads its identifier from the SSM parameter created
-by Lab 00.
+by the Workshop Studio foundation infrastructure.
 
 ### FastAPI application
 
@@ -355,8 +357,9 @@ The namespace enables the Kubernetes restricted Pod Security Standard.
 
 ### EKS Pod Identity
 
-The pods use the `mortgage-assistant` Kubernetes service account. Lab 00
-associated that service account with an IAM role through EKS Pod Identity.
+The pods use the `mortgage-assistant` Kubernetes service account. Workshop
+Studio foundation infrastructure associates that service account with an IAM
+role through EKS Pod Identity.
 
 The application therefore receives temporary AWS credentials without storing
 long-lived AWS access keys in the image or Kubernetes Secret. The role allows
@@ -370,18 +373,21 @@ the application to:
 
 `scripts/deploy-application.sh` automates the application deployment:
 
-1. Reads the existing Lab 00 CloudFormation outputs.
-2. Detects or accepts the allowed source CIDR.
-3. Configures the local `kubectl` context.
-4. Confirms that AWS Load Balancer Controller is ready.
-5. Authenticates Docker with Amazon ECR.
-6. Builds a `linux/amd64` image with an immutable timestamped tag.
-7. Pushes the image to the existing ECR repository.
-8. Creates or updates the Kubernetes namespace and service account.
-9. Creates the API-key Kubernetes Secret.
-10. Renders and applies the Deployment, PodDisruptionBudget, and Service.
-11. Waits for the Deployment rollout and Network Load Balancer.
-12. Checks API health and sends one smoke-test prompt.
+1. Reads the EKS cluster name from `/workshop/lab3/cluster-name` and the ECR
+   repository URI from `/workshop/lab3/repository-uri` in SSM Parameter Store.
+2. Uses defaults for `MODEL_ID` and `KB_PARAMETER_NAME` unless you override
+   those environment variables.
+3. Detects or accepts the allowed source CIDR.
+4. Configures the local `kubectl` context.
+5. Confirms that AWS Load Balancer Controller is ready.
+6. Authenticates Docker with Amazon ECR.
+7. Builds a `linux/amd64` image with an immutable timestamped tag.
+8. Pushes the image to the existing ECR repository.
+9. Creates or updates the Kubernetes namespace and service account.
+10. Creates the API-key Kubernetes Secret.
+11. Renders and applies the Deployment, PodDisruptionBudget, and Service.
+12. Waits for the Deployment rollout and Network Load Balancer.
+13. Checks API health and sends one smoke-test prompt.
 
 ### Invocation client
 
@@ -442,7 +448,7 @@ Strands mortgage assistant
 The implementation should:
 
 1. Add the Cognito User Pool, public application client, domain, and required
-   outputs to Lab 00.
+   outputs to the Workshop Studio foundation infrastructure.
 2. Configure the application client for authorization-code flow with PKCE so
    the participant client does not contain an application-client secret.
 3. Update `app/invoke_eks.py` to sign in, obtain an access token, refresh it
@@ -468,13 +474,14 @@ workshop interface.
 
 ## Prerequisites
 
-Complete Labs 00–02 and confirm your AWS identity:
+Use the Workshop Studio environment, complete Labs 01–02, and confirm your AWS
+identity:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-Confirm that the EKS cluster is reachable:
+Confirm that the pre-provisioned EKS cluster is reachable:
 
 ```bash
 kubectl get nodes
@@ -484,20 +491,17 @@ You also need:
 
 - AWS CLI v2.
 - `kubectl`.
-- Docker with Buildx, or Finch's Docker-compatible CLI.
+- Docker, with Buildx when available.
 - `uv`.
 - Python 3.12 or later.
 - `curl`.
 - `openssl`.
-- Access to the Bedrock model configured in Lab 00.
+- Access to the Bedrock model configured by the Workshop Studio foundation
+  infrastructure.
 
 The scripts use the default AWS CLI profile unless `--profile` is provided.
-
-If Docker is provided by Finch:
-
-```bash
-finch vm start
-```
+Do not run `00-workshop-setup`; Workshop Studio has already provisioned the
+required infrastructure.
 
 ## Step 1: Review the Lab 03 files
 
@@ -637,16 +641,13 @@ chmod +x scripts/deploy-application.sh
 Deploy using the default AWS CLI profile:
 
 ```bash
-./scripts/deploy-application.sh \
-  --region us-west-2
+./scripts/deploy-application.sh --region us-west-2
 ```
 
 For a named profile:
 
 ```bash
-./scripts/deploy-application.sh \
-  --region us-west-2 \
-  --profile YOUR_AWS_PROFILE
+./scripts/deploy-application.sh --region us-west-2 --profile YOUR_AWS_PROFILE
 ```
 
 The script detects your current public IP and permits that `/32` CIDR to reach
@@ -655,9 +656,7 @@ the Network Load Balancer.
 To provide the CIDR explicitly:
 
 ```bash
-./scripts/deploy-application.sh \
-  --region us-west-2 \
-  --service-access-cidr 203.0.113.10/32
+./scripts/deploy-application.sh --region us-west-2 --service-access-cidr 203.0.113.10/32
 ```
 
 Replace the example address with the public IP that should be allowed. Avoid
@@ -668,8 +667,7 @@ To use a stable API key across deployments:
 ```bash
 export MORTGAGE_API_KEY="$(openssl rand -hex 32)"
 
-./scripts/deploy-application.sh \
-  --region us-west-2
+./scripts/deploy-application.sh --region us-west-2
 ```
 
 The first image build, push, EKS rollout, and Network Load Balancer creation
@@ -1004,9 +1002,7 @@ echo "$PREVIOUS_IMAGE"
 Rerun the deployment script to represent releasing a new application version:
 
 ```bash
-./scripts/deploy-application.sh \
-  --region us-west-2 \
-  --prompt "What is a mortgage term?"
+./scripts/deploy-application.sh --region us-west-2
 ```
 
 The script creates a new timestamped image and updates the existing
@@ -1079,27 +1075,39 @@ The prompt must contain between 1 and 4,000 characters.
 
 ## Troubleshooting
 
-### The Lab 00 stack cannot be found
+### The required Workshop Studio SSM parameters cannot be read
 
-Confirm the stack exists in the selected Region:
+Confirm that both required parameters exist in the selected Region and contain
+values:
 
 ```bash
-aws cloudformation describe-stacks \
+aws ssm get-parameters \
   --region us-west-2 \
-  --stack-name mortgage-assistant-workshop
+  --names \
+    /workshop/lab3/cluster-name \
+    /workshop/lab3/repository-uri \
+  --query 'Parameters[].{Name:Name,Value:Value}'
 ```
 
-If it does not exist, complete Lab 00 first.
+The response must contain both parameter names. If either parameter is missing
+or empty, confirm that the Workshop Studio foundation setup completed for your
+participant environment. Do not run `00-workshop-setup`.
 
 ### kubectl cannot connect to EKS
 
-Refresh the local kubeconfig:
+Read the cluster name from SSM and refresh the local kubeconfig:
 
 ```bash
+CLUSTER_NAME="$(aws ssm get-parameter \
+  --region us-west-2 \
+  --name /workshop/lab3/cluster-name \
+  --query Parameter.Value \
+  --output text)"
+
 aws eks update-kubeconfig \
   --region us-west-2 \
-  --name mortgage-assistant-workshop-cluster \
-  --alias mortgage-assistant-workshop-cluster
+  --name "$CLUSTER_NAME" \
+  --alias "$CLUSTER_NAME"
 ```
 
 Then check:
@@ -1127,7 +1135,7 @@ kubectl logs \
   --tail=200
 ```
 
-Lab 00 installs the controller.
+Workshop Studio permission setup installs the controller.
 
 ### Docker cannot build the image
 
@@ -1138,14 +1146,28 @@ docker version
 docker buildx version
 ```
 
-When using Finch:
-
-```bash
-finch vm start
-```
-
 The image must be built for `linux/amd64` because the workshop EKS nodes use
 the x86-64 architecture.
+
+If Docker reports permission errors for its configuration directory, ensure
+that `~/.docker` exists, is owned by your user, and has mode `0700`:
+
+```bash
+mkdir -p "$HOME/.docker"
+sudo chown -R "$USER":"$(id -gn)" "$HOME/.docker"
+chmod 0700 "$HOME/.docker"
+```
+
+If Docker reports permission errors for its socket after your user was added
+to the `docker` group, start a shell with the updated group membership:
+
+```bash
+newgrp docker
+```
+
+Alternatively, close and reopen the Code Editor terminal. Then rerun the
+Docker command or deployment script without `sudo`. Do not run the deployment
+script with `sudo`.
 
 ### Docker cannot push to ECR
 
@@ -1236,9 +1258,7 @@ curl --fail --silent --show-error \
 Rerun the deployment with the new `/32` CIDR:
 
 ```bash
-./scripts/deploy-application.sh \
-  --region us-west-2 \
-  --service-access-cidr YOUR_PUBLIC_IP/32
+./scripts/deploy-application.sh --region us-west-2 --service-access-cidr YOUR_PUBLIC_IP/32
 ```
 
 ### The request receives HTTP 401
@@ -1269,12 +1289,19 @@ kubectl get pod \
   --output jsonpath='{.items[0].spec.serviceAccountName}{"\n"}'
 ```
 
-Confirm the Lab 00 Pod Identity association exists:
+Read the cluster name from SSM and confirm the Workshop Studio Pod Identity
+association exists:
 
 ```bash
+CLUSTER_NAME="$(aws ssm get-parameter \
+  --region us-west-2 \
+  --name /workshop/lab3/cluster-name \
+  --query Parameter.Value \
+  --output text)"
+
 aws eks list-pod-identity-associations \
   --region us-west-2 \
-  --cluster-name mortgage-assistant-workshop-cluster
+  --cluster-name "$CLUSTER_NAME"
 ```
 
 Review the pod logs for the exact SSM or Bedrock action that was denied.
@@ -1362,7 +1389,7 @@ future authorization, telemetry, rate limiting, and policy controls.
 | AWS calls rely mainly on SDK defaults | Throttling or transient errors may fail requests unpredictably. | Configure explicit connection and operation timeouts, bounded exponential backoff with jitter, retry budgets, and circuit breaking. Do not blindly retry side effects. |
 | Prompt instructions are the main model safety control | Prompt injection, unsupported claims, or unsafe tool arguments can bypass intended behavior. | Add Bedrock Guardrails where appropriate, strict tool schemas, tool authorization, input/output validation, retrieval-source controls, and adversarial evaluations. |
 | Application logs remain in pod output only | Operators lack end-to-end traces, service-level metrics, retention policy, and actionable alarms. | Export structured logs, OpenTelemetry traces, and metrics to CloudWatch. Correlate request and trace IDs and alarm on latency, errors, throttling, saturation, token use, and cost. |
-| Deployment runs from a participant laptop | There is no controlled promotion, approval, provenance, automated security gate, or rollback policy. | Use CI/CD with tests and model evaluations, image scanning and signing, software bills of materials, immutable image digests, staged rollout, and automated rollback criteria. |
+| Deployment runs from Workshop Studio Code Editor | There is no controlled promotion, approval, provenance, automated security gate, or rollback policy. | Use CI/CD with tests and model evaluations, image scanning and signing, software bills of materials, immutable image digests, staged rollout, and automated rollback criteria. |
 | Tests are primarily local and functional | They do not establish production scale, resilience, security, or model quality. | Add integration, contract, load, soak, failure-injection, security, and recovery tests plus versioned evaluations for grounding, accuracy, safety, latency, and cost. |
 | No formal recovery and dependency plan | EKS, ECR, SSM, Bedrock, the Knowledge Base, and networking have different failure and recovery characteristics. | Define service-level objectives, RTO and RPO, dependency failure behavior, regional recovery, runbooks, game days, and tested rollback procedures. |
 | Stateless requests have no user conversation context | This is safe for routing but cannot support continuity or personalized memory. | Add state only after authenticated identity, authorization, concurrency, privacy, retention, and deletion controls are designed. Lab 04 demonstrates the workshop memory pattern. |
@@ -1376,8 +1403,8 @@ or synthetic information until those controls are implemented.
 If you are continuing to Lab 04, do not clean up Lab 03. Lab 04 updates the
 same `mortgage-assistant` Deployment and Network Load Balancer.
 
-To remove only the Lab 03 application and its load balancer while retaining
-the Lab 00 infrastructure:
+If you do not intend to continue, you can remove only the Lab 03 application
+and its load balancer:
 
 ```bash
 kubectl delete namespace mortgage-assistant \
@@ -1386,19 +1413,14 @@ kubectl delete namespace mortgage-assistant \
 ```
 
 Deleting the namespace removes the Deployment, pods, API-key Secret,
-PodDisruptionBudget, Service, and associated Network Load Balancer.
+PodDisruptionBudget, Service, and associated Network Load Balancer. The EKS
+cluster, ECR repository, Bedrock Knowledge Base, DynamoDB memory
+infrastructure, and other Workshop Studio foundation resources remain until
+the participant environment ends.
 
-The EKS cluster, ECR repository, Bedrock Knowledge Base, DynamoDB memory
-infrastructure, and other Lab 00 resources remain.
-
-To remove the entire workshop, return to the repository root:
-
-```bash
-cd ..
-
-./00-workshop-setup/scripts/cleanup.sh \
-  --region us-west-2
-```
+Workshop Studio automatically deletes the temporary participant account and
+its remaining resources when the environment is terminated. No
+`00-workshop-setup` cleanup script is required.
 
 ## Completion checkpoint
 
