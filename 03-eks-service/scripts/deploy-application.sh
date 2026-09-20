@@ -2,29 +2,36 @@
 set -euo pipefail
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STACK_NAME="mortgage-assistant-workshop"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
 SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
+CLUSTER_NAME_PARAMETER="${CLUSTER_NAME_PARAMETER:-/workshop/lab3/cluster-name}"
+REPOSITORY_URI_PARAMETER="${REPOSITORY_URI_PARAMETER:-/workshop/lab3/repository-uri}"
+MODEL_ID="${MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
+KB_PARAMETER_NAME="${KB_PARAMETER_NAME:-/app/mortgage_assistant/kb_id}"
 
 usage() {
   cat <<'EOF'
 Usage: 03-eks-service/scripts/deploy-application.sh [options]
 
 Options:
-  --stack-name NAME           Lab 00 CloudFormation stack name.
   --region REGION             AWS Region (default: us-west-2).
   --profile PROFILE           AWS CLI profile; omit to use the default profile.
   --service-access-cidr CIDR  CIDR allowed to invoke the API (default: detected-ip/32).
   --prompt TEXT               Prompt used for the deployment smoke test.
   -h, --help                  Show this help.
+
+Environment variables:
+  CLUSTER_NAME_PARAMETER      SSM parameter containing the EKS cluster name.
+  REPOSITORY_URI_PARAMETER    SSM parameter containing the ECR repository URI.
+  MODEL_ID                    Bedrock model ID used by the application.
+  KB_PARAMETER_NAME           SSM parameter containing the Knowledge Base ID.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stack-name) STACK_NAME="$2"; shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
@@ -50,30 +57,42 @@ aws_cli() {
   aws "${AWS_OPTIONS[@]}" "$@"
 }
 
-if ! aws_cli cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" >/dev/null 2>&1; then
-  echo "Lab 00 stack $STACK_NAME was not found in $REGION." >&2
-  echo "Run 00-workshop-setup/scripts/deploy-infrastructure.sh first." >&2
-  exit 1
-fi
+read_ssm_parameter() {
+  local parameter_name="$1"
+  local value
 
-stack_output() {
-  local output_key="$1"
-  aws_cli cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --query "Stacks[0].Outputs[?OutputKey=='${output_key}'].OutputValue | [0]" \
-    --output text
+  if ! value="$(aws_cli ssm get-parameter \
+    --name "$parameter_name" \
+    --query Parameter.Value \
+    --output text)"; then
+    echo "Unable to read required SSM parameter: $parameter_name" >&2
+    return 1
+  fi
+
+  if [[ -z "$value" || "$value" == "None" ]]; then
+    echo "SSM parameter is empty: $parameter_name" >&2
+    return 1
+  fi
+
+  printf '%s' "$value"
 }
 
+CLUSTER_NAME="$(read_ssm_parameter "$CLUSTER_NAME_PARAMETER")"
+REPOSITORY_URI="$(read_ssm_parameter "$REPOSITORY_URI_PARAMETER")"
+
 if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
-  PUBLIC_IP="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+  PUBLIC_IP="$(curl --fail --silent --show-error \
+    https://checkip.amazonaws.com | tr -d '[:space:]')"
   SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
 fi
 
-CLUSTER_NAME="$(stack_output EksClusterName)"
-REPOSITORY_URI="$(stack_output EcrRepositoryUri)"
-MODEL_ID="$(stack_output AgentModelId)"
-KB_PARAMETER_NAME="$(stack_output KnowledgeBaseParameterName)"
+echo "Using Workshop Studio infrastructure"
+echo "  Region: $REGION"
+echo "  EKS cluster: $CLUSTER_NAME"
+echo "  ECR repository: $REPOSITORY_URI"
+echo "  Bedrock model: $MODEL_ID"
+echo "  Knowledge Base parameter: $KB_PARAMETER_NAME"
+echo "  Service access CIDR: $SERVICE_ACCESS_CIDR"
 
 echo "Configuring kubectl for $CLUSTER_NAME"
 aws_cli eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME"
@@ -83,7 +102,7 @@ if ! kubectl rollout status \
   deployment/aws-load-balancer-controller \
   --timeout=2m; then
   echo "AWS Load Balancer Controller is not ready." >&2
-  echo "Complete Lab 00 before deploying the application." >&2
+  echo "Verify that the Workshop Studio permission-setup stack completed." >&2
   exit 1
 fi
 
