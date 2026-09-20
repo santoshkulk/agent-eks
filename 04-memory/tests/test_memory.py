@@ -13,6 +13,12 @@ import memory  # noqa: E402
 
 
 class MemoryConfigurationTests(unittest.TestCase):
+    def test_default_embedding_model(self) -> None:
+        self.assertEqual(
+            memory.MEMORY_EMBEDDING_MODEL_ID,
+            "amazon.titan-embed-text-v2:0",
+        )
+
     def test_actor_partition(self) -> None:
         self.assertEqual(
             memory.actor_partition("participant-123456789012"),

@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_STACK_NAME="mortgage-assistant-workshop"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
+CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 
 usage() {
   cat <<'EOF'
 Usage: 04-memory/scripts/cleanup-memory.sh [options]
 
 Options:
-  --base-stack-name NAME  Lab 00 CloudFormation stack name.
-  --region REGION         AWS Region (default: us-west-2).
-  --profile PROFILE       AWS CLI profile; omit to use the default profile.
-  -h, --help              Show this help.
+  --region REGION    AWS Region (default: us-west-2).
+  --profile PROFILE  AWS CLI profile; omit to use the default profile.
+  -h, --help         Show this help.
 
 This removes the Lab 04 Kubernetes application only. Shared infrastructure,
-including the DynamoDB memory table, remains owned by Lab 00.
+including the DynamoDB memory table, remains managed by Workshop Studio.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base-stack-name) BASE_STACK_NAME="$2"; shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -39,16 +37,14 @@ aws_cli() {
   aws "${AWS_OPTIONS[@]}" "$@"
 }
 
-if ! aws_cli cloudformation describe-stacks \
-  --stack-name "$BASE_STACK_NAME" >/dev/null 2>&1; then
-  echo "Lab 00 stack $BASE_STACK_NAME was not found in $REGION." >&2
+CLUSTER_NAME="$(aws_cli ssm get-parameter \
+  --name "$CLUSTER_PARAMETER_NAME" \
+  --query 'Parameter.Value' \
+  --output text)"
+if [[ -z "$CLUSTER_NAME" || "$CLUSTER_NAME" == "None" ]]; then
+  echo "SSM parameter $CLUSTER_PARAMETER_NAME is missing or empty in $REGION." >&2
   exit 1
 fi
-
-CLUSTER_NAME="$(aws_cli cloudformation describe-stacks \
-  --stack-name "$BASE_STACK_NAME" \
-  --query "Stacks[0].Outputs[?OutputKey=='EksClusterName'].OutputValue | [0]" \
-  --output text)"
 
 echo "Removing the Lab 04 EKS application and load balancer"
 aws_cli eks update-kubeconfig \
@@ -60,4 +56,4 @@ kubectl delete namespace mortgage-assistant \
   --timeout=15m
 
 echo "Lab 04 application removed."
-echo "Shared DynamoDB memory infrastructure remains managed by Lab 00."
+echo "Shared DynamoDB memory infrastructure remains managed by Workshop Studio."

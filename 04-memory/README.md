@@ -111,8 +111,10 @@ flowchart TB
 
 The existing Bedrock Knowledge Base and mortgage tools remain unchanged. Lab
 04 updates the same `mortgage-assistant` Deployment and continues to use the
-same Network Load Balancer. Lab 00 owns the EKS cluster, DynamoDB table, vector
-index, KMS key, Pod Identity role, and other long-running infrastructure.
+same Network Load Balancer. Workshop Studio pre-provisions the EKS cluster,
+DynamoDB table, vector index, Pod Identity role, and other shared workshop
+infrastructure. Lab 04 discovers those resources through canonical Systems
+Manager Parameter Store paths.
 
 ### Where FastAPI sits in the memory-enabled service
 
@@ -304,15 +306,17 @@ Lab 04 uses one on-demand DynamoDB table with:
 
 - String partition key `pk`.
 - String sort key `sk`.
-- Customer-managed AWS KMS encryption key.
+- Server-side encryption with the AWS managed KMS key for DynamoDB,
+  `alias/aws/dynamodb`.
 - Point-in-time recovery.
 - TTL enabled on the `expireAt` attribute.
 - A 1,024-dimension cosine vector index.
 - `pk` as the vector search partition.
 
-This infrastructure is owned and provisioned by Lab 00 before participants
-receive their workshop accounts. Lab 04 reads the table and model settings
-from the Lab 00 CloudFormation outputs and only deploys application code.
+Workshop Studio provisions this shared infrastructure before participants
+receive their workshop accounts. Lab 04 discovers the table and vector index
+from canonical Parameter Store paths and uses fixed code defaults for the
+agent and embedding models. It only deploys application code.
 
 All data for an actor uses a prefix such as:
 
@@ -425,7 +429,7 @@ customer information.
 
 ## Prerequisites
 
-Complete Labs 00–03 and confirm:
+Open the Workshop Studio environment, complete Labs 01–03, and confirm:
 
 ```bash
 aws sts get-caller-identity
@@ -449,6 +453,31 @@ You also need:
 When using a named AWS profile, pass `--profile` to both deployment and
 client commands.
 
+## Workshop Studio resource discovery
+
+Workshop Studio pre-provisions shared resources and publishes their identifiers
+in Systems Manager Parameter Store. Lab 04 uses these canonical paths:
+
+| Resource | Parameter Store path |
+|---|---|
+| EKS cluster name | `/workshop/mortgage-assistant/eks/cluster-name` |
+| ECR repository URI | `/workshop/mortgage-assistant/ecr/repository-uri` |
+| DynamoDB memory table name | `/workshop/mortgage-assistant/memory/table-name` |
+| DynamoDB vector index name | `/workshop/mortgage-assistant/memory/vector-index-name` |
+| Bedrock Knowledge Base ID | `/workshop/mortgage-assistant/bedrock/knowledge-base-id` |
+
+The deployment and cleanup scripts read these parameters directly and do not
+depend on a CloudFormation stack name or stack outputs. The application keeps
+these model defaults in code:
+
+- Agent model: `us.anthropic.claude-sonnet-4-6`.
+- Embedding model: `amazon.titan-embed-text-v2:0`.
+
+`hydrate_memory.py` and `inspect_memory.py` discover the table and vector index
+through Parameter Store by default. Their `--table-name`,
+`--vector-index-name`, and `--embedding-model-id` options remain available for
+direct CLI overrides.
+
 ## Step 1: Review the Lab 04 files
 
 ```text
@@ -470,10 +499,9 @@ client commands.
 └── uv.lock
 ```
 
-Lab 00 contains the CloudFormation resources and the provisioning helper that
-create the KMS key, runtime IAM policy, DynamoDB table, and vector index.
-`hydrate_memory.py` is participant-facing test-data tooling; it does not create
-infrastructure.
+Workshop Studio provisions the runtime IAM policy, DynamoDB table, and vector
+index before the lab begins. `hydrate_memory.py` is participant-facing
+test-data tooling; it does not create infrastructure.
 
 ## Step 2: Install and test the module locally
 
@@ -514,16 +542,19 @@ For a named profile:
 
 The deployment script:
 
-1. Reads the existing Lab 00 stack outputs.
+1. Reads the canonical Workshop Studio Parameter Store values.
 2. Confirms the pre-provisioned memory table and vector index are active.
-3. Builds and pushes the Lab 04 image.
-4. Updates the existing EKS Deployment.
-5. Reuses the existing Kubernetes API-key Secret when present.
-6. Waits for the pods and API to become ready.
-7. Sends one smoke-test prompt.
+3. Uses `us.anthropic.claude-sonnet-4-6` for the agent and
+   `amazon.titan-embed-text-v2:0` for embeddings.
+4. Builds and pushes the Lab 04 image.
+5. Updates the existing EKS Deployment.
+6. Reuses the existing Kubernetes API-key Secret when present.
+7. Waits for the pods and API to become ready.
+8. Sends one smoke-test prompt.
 
-The script does not create or update AWS infrastructure. EKS, the Knowledge
-Base, ECR, IAM, KMS, DynamoDB, and the vector index are owned by Lab 00.
+The script does not create or update AWS infrastructure. Workshop Studio
+manages the shared EKS cluster, Knowledge Base, ECR repository, IAM resources,
+DynamoDB table, and vector index.
 
 ## Step 4: Check the deployment
 
@@ -821,26 +852,35 @@ Response:
 
 ### The shared vector table is unavailable
 
-Lab 00 creates the table before participants begin the workshop. Confirm that
-the setup environment installed boto3 1.43.64 or later:
+Workshop Studio creates the table before participants begin the workshop.
+Confirm that the canonical resource parameters are available:
 
 ```bash
-uv run --project ../00-workshop-setup python -c \
-  'import boto3; print(boto3.__version__)'
+aws ssm get-parameters \
+  --region us-west-2 \
+  --names \
+    /workshop/mortgage-assistant/memory/table-name \
+    /workshop/mortgage-assistant/memory/vector-index-name
 ```
 
-The setup module pins a compatible version. A workshop administrator can rerun
-`00-workshop-setup/scripts/deploy-infrastructure.sh` to validate or repair the
-pre-provisioned table.
+If either parameter is absent or empty, use the Workshop Studio support path to
+repair the pre-provisioned environment. The Lab 04 utilities require boto3
+1.43.64 or later for DynamoDB vector operations.
 
 ### The vector index remains in CREATING
 
 Index creation and backfill can take several minutes. Check:
 
 ```bash
+MEMORY_TABLE_NAME="$(aws ssm get-parameter \
+  --region us-west-2 \
+  --name /workshop/mortgage-assistant/memory/table-name \
+  --query 'Parameter.Value' \
+  --output text)"
+
 aws dynamodb describe-table \
   --region us-west-2 \
-  --table-name mortgage-assistant-workshop-memory \
+  --table-name "$MEMORY_TABLE_NAME" \
   --query 'Table.VectorIndexes'
 ```
 
@@ -885,18 +925,29 @@ export MORTGAGE_API_KEY="$(
 
 ### Pods receive AccessDenied from DynamoDB
 
-Confirm the Lab 00 stack contains the memory outputs and pod-role permissions:
+Confirm that Parameter Store discovery succeeds, then inspect the discovered
+table and pod logs:
 
 ```bash
-aws cloudformation describe-stacks \
+MEMORY_TABLE_NAME="$(aws ssm get-parameter \
   --region us-west-2 \
-  --stack-name mortgage-assistant-workshop
+  --name /workshop/mortgage-assistant/memory/table-name \
+  --query 'Parameter.Value' \
+  --output text)"
+
+aws dynamodb describe-table \
+  --region us-west-2 \
+  --table-name "$MEMORY_TABLE_NAME" \
+  --query 'Table.[TableName,TableStatus,SSEDescription]'
 
 kubectl logs \
   --namespace mortgage-assistant \
   deployment/mortgage-assistant \
   --tail=200
 ```
+
+If discovery works but DynamoDB access is denied, use the Workshop Studio
+support path to verify the pre-provisioned EKS Pod Identity permissions.
 
 ## Production-aligned patterns demonstrated by this lab
 
@@ -942,10 +993,12 @@ partition filters separate memory namespaces in application code.
 
 ### Use managed data-protection controls
 
-Lab 00 configures DynamoDB on-demand capacity, encryption with a
-customer-managed KMS key, point-in-time recovery, TTL, and a partition-scoped
-vector index. These are useful production building blocks, although retention,
-backup, restore, and deletion procedures must still be defined and tested.
+Workshop Studio configures DynamoDB on-demand capacity, server-side encryption
+with the AWS managed KMS key for DynamoDB (`alias/aws/dynamodb`), point-in-time
+recovery, TTL, and a partition-scoped vector index. The current table does not
+use a customer-managed KMS key. These are useful production building blocks,
+although retention, backup, restore, and deletion procedures must still be
+defined and tested.
 
 ### Use workload identity instead of static AWS keys
 
@@ -991,7 +1044,7 @@ The following controls are intentionally outside the scope of this workshop.
 | One Uvicorn worker with concurrency limited to four per pod | The workshop limit may be too low for production, while increasing it without testing can exhaust memory or service quotas. | Benchmark memory and latency, then tune workers, replicas, concurrency, connection pools, and Bedrock quotas together. Queue long-running asynchronous work. |
 | Session growth is not managed | Long conversations can become expensive or approach DynamoDB item-size limits. | Monitor snapshot size, compact or summarize old turns, cap conversation length, and offload large encrypted payloads to Amazon S3 when supported by the storage design. |
 | Vector-index updates are eventually consistent | A newly stored preference may not be immediately searchable. | Retain new memory in the active session and use bounded retry or an exact-read fallback when immediate confirmation is required. |
-| No tested disaster-recovery procedure | Point-in-time recovery alone does not demonstrate that recovery objectives can be met. | Define RTO and RPO, regularly test table and KMS recovery, document regional dependencies, and add multi-Region recovery if required. |
+| No tested disaster-recovery procedure | Point-in-time recovery alone does not demonstrate that recovery objectives can be met. | Define RTO and RPO, regularly test table restore and encryption configuration recovery, document regional dependencies, and add multi-Region recovery if required. |
 | Deployment runs from a participant laptop | There is no controlled promotion, provenance, approval, or automated rollback process. | Use CI/CD with reviewed changes, automated tests and evaluations, image scanning and signing, immutable image digests, staged rollout, and rollback criteria. |
 | Unit tests do not exercise AWS or production load | They cannot detect IAM, quota, race, retrieval-quality, model-behaviour, or integration regressions. | Add integration, concurrency, failure-injection, load, security, and recovery tests plus versioned evaluations for grounding, safety, latency, quality, and cost. |
 
@@ -1008,9 +1061,9 @@ To remove only Lab 04 resources:
   --region us-west-2
 ```
 
-This removes only the EKS application namespace and load balancer. The
-DynamoDB memory table, vector index, IAM policy, KMS key, EKS cluster, and
-Knowledge Base remain shared Lab 00 infrastructure.
+This removes only the EKS application namespace and load balancer. Workshop
+Studio continues to manage the shared DynamoDB memory table, vector index, IAM
+resources, EKS cluster, ECR repository, and Knowledge Base.
 
 To run Lab 03 again afterward:
 
@@ -1019,8 +1072,8 @@ cd ../03-eks-service
 ./scripts/deploy-application.sh --region us-west-2
 ```
 
-To remove the entire workshop, use the root cleanup instructions. The Lab 00
-cleanup script deletes the memory table before deleting the shared stack.
+To remove the entire workshop, use the Workshop Studio cleanup instructions.
+Do not delete shared resources from the Lab 04 cleanup script.
 
 ## Completion checkpoint
 

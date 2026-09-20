@@ -2,19 +2,24 @@
 set -euo pipefail
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASE_STACK_NAME="mortgage-assistant-workshop"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
 SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
 SESSION_TTL_SECONDS="604800"
+MODEL_ID="us.anthropic.claude-sonnet-4-6"
+MEMORY_EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
+CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
+REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
+MEMORY_TABLE_PARAMETER_NAME="/workshop/mortgage-assistant/memory/table-name"
+MEMORY_VECTOR_INDEX_PARAMETER_NAME="/workshop/mortgage-assistant/memory/vector-index-name"
+KB_PARAMETER_NAME="/workshop/mortgage-assistant/bedrock/knowledge-base-id"
 
 usage() {
   cat <<'EOF'
 Usage: 04-memory/scripts/deploy-memory.sh [options]
 
 Options:
-  --base-stack-name NAME      Lab 00 CloudFormation stack name.
   --region REGION             AWS Region (default: us-west-2).
   --profile PROFILE           AWS CLI profile; omit to use the default profile.
   --service-access-cidr CIDR  CIDR allowed to invoke the API.
@@ -26,7 +31,6 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base-stack-name) BASE_STACK_NAME="$2"; shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
@@ -59,20 +63,18 @@ aws_cli() {
   aws "${AWS_OPTIONS[@]}" "$@"
 }
 
-if ! aws_cli cloudformation describe-stacks \
-  --stack-name "$BASE_STACK_NAME" >/dev/null 2>&1; then
-  echo "Lab 00 stack $BASE_STACK_NAME was not found in $REGION." >&2
-  echo "Run 00-workshop-setup/scripts/deploy-infrastructure.sh first." >&2
-  exit 1
-fi
-
-stack_output() {
-  local stack_name="$1"
-  local output_key="$2"
-  aws_cli cloudformation describe-stacks \
-    --stack-name "$stack_name" \
-    --query "Stacks[0].Outputs[?OutputKey=='${output_key}'].OutputValue | [0]" \
-    --output text
+ssm_parameter() {
+  local parameter_name="$1"
+  local value
+  value="$(aws_cli ssm get-parameter \
+    --name "$parameter_name" \
+    --query 'Parameter.Value' \
+    --output text)"
+  if [[ -z "$value" || "$value" == "None" ]]; then
+    echo "SSM parameter $parameter_name is missing or empty in $REGION." >&2
+    return 1
+  fi
+  printf '%s' "$value"
 }
 
 if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
@@ -80,19 +82,10 @@ if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
   SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
 fi
 
-CLUSTER_NAME="$(stack_output "$BASE_STACK_NAME" EksClusterName)"
-REPOSITORY_URI="$(stack_output "$BASE_STACK_NAME" EcrRepositoryUri)"
-MODEL_ID="$(stack_output "$BASE_STACK_NAME" AgentModelId)"
-KB_PARAMETER_NAME="$(stack_output "$BASE_STACK_NAME" KnowledgeBaseParameterName)"
-MEMORY_TABLE_NAME="$(stack_output "$BASE_STACK_NAME" MemoryTableName)"
-MEMORY_VECTOR_INDEX_NAME="$(stack_output "$BASE_STACK_NAME" MemoryVectorIndexName)"
-MEMORY_EMBEDDING_MODEL_ID="$(stack_output "$BASE_STACK_NAME" MemoryEmbeddingModelId)"
-
-if [[ -z "$MEMORY_TABLE_NAME" || "$MEMORY_TABLE_NAME" == "None" ]]; then
-  echo "Lab 00 stack $BASE_STACK_NAME does not contain memory outputs." >&2
-  echo "Update Lab 00 infrastructure before deploying Lab 04." >&2
-  exit 1
-fi
+CLUSTER_NAME="$(ssm_parameter "$CLUSTER_PARAMETER_NAME")"
+REPOSITORY_URI="$(ssm_parameter "$REPOSITORY_PARAMETER_NAME")"
+MEMORY_TABLE_NAME="$(ssm_parameter "$MEMORY_TABLE_PARAMETER_NAME")"
+MEMORY_VECTOR_INDEX_NAME="$(ssm_parameter "$MEMORY_VECTOR_INDEX_PARAMETER_NAME")"
 
 MEMORY_STATUS="$(aws_cli dynamodb describe-table \
   --table-name "$MEMORY_TABLE_NAME" \
@@ -103,7 +96,7 @@ MEMORY_INDEX_STATUS="$(aws_cli dynamodb describe-table \
   --query "Table.VectorIndexes[?IndexName=='${MEMORY_VECTOR_INDEX_NAME}'].IndexStatus | [0]" \
   --output text)"
 if [[ "$MEMORY_STATUS" != "ACTIVE" || "$MEMORY_INDEX_STATUS" != "ACTIVE" ]]; then
-  echo "Lab 00 memory storage is not ready." >&2
+  echo "Workshop Studio memory storage is not ready." >&2
   echo "  Table: $MEMORY_STATUS" >&2
   echo "  Vector index: $MEMORY_INDEX_STATUS" >&2
   exit 1

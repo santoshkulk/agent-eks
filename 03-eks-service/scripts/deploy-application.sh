@@ -6,10 +6,10 @@ REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
 SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
-CLUSTER_NAME_PARAMETER="${CLUSTER_NAME_PARAMETER:-/workshop/lab3/cluster-name}"
-REPOSITORY_URI_PARAMETER="${REPOSITORY_URI_PARAMETER:-/workshop/lab3/repository-uri}"
+CLUSTER_NAME_PARAMETER="${CLUSTER_NAME_PARAMETER:-/workshop/mortgage-assistant/eks/cluster-name}"
+REPOSITORY_URI_PARAMETER="${REPOSITORY_URI_PARAMETER:-/workshop/mortgage-assistant/ecr/repository-uri}"
 MODEL_ID="${MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
-KB_PARAMETER_NAME="${KB_PARAMETER_NAME:-/app/mortgage_assistant/kb_id}"
+KB_PARAMETER_NAME="${KB_PARAMETER_NAME:-/workshop/mortgage-assistant/bedrock/knowledge-base-id}"
 
 usage() {
   cat <<'EOF'
@@ -102,7 +102,7 @@ if ! kubectl rollout status \
   deployment/aws-load-balancer-controller \
   --timeout=2m; then
   echo "AWS Load Balancer Controller is not ready." >&2
-  echo "Verify that the Workshop Studio permission-setup stack completed." >&2
+  echo "Verify that the Workshop Studio AWS Load Balancer Controller installation completed." >&2
   exit 1
 fi
 

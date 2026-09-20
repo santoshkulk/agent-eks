@@ -13,20 +13,27 @@ from strands_dynamodb_storage import (
 )
 
 
-def stack_output(
-    session: boto3.Session,
-    region: str,
-    stack_name: str,
-    output_key: str,
+MEMORY_TABLE_PARAMETER_NAME = "/workshop/mortgage-assistant/memory/table-name"
+MEMORY_VECTOR_INDEX_PARAMETER_NAME = (
+    "/workshop/mortgage-assistant/memory/vector-index-name"
+)
+DEFAULT_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
+
+
+def ssm_parameter(ssm_client: Any, parameter_name: str) -> str:
+    response = ssm_client.get_parameter(Name=parameter_name)
+    value = response["Parameter"]["Value"].strip()
+    if not value:
+        raise RuntimeError(f"SSM parameter {parameter_name} is empty")
+    return value
+
+
+def resource_name(
+    override: str | None,
+    ssm_client: Any,
+    parameter_name: str,
 ) -> str:
-    response = session.client("cloudformation", region_name=region).describe_stacks(
-        StackName=stack_name
-    )
-    outputs = response["Stacks"][0].get("Outputs", [])
-    for output in outputs:
-        if output.get("OutputKey") == output_key:
-            return output["OutputValue"]
-    raise RuntimeError(f"Stack {stack_name} does not contain output {output_key}")
+    return override or ssm_parameter(ssm_client, parameter_name)
 
 
 def default_actor_id(session: boto3.Session) -> str:
@@ -125,15 +132,13 @@ def main() -> int:
         ),
     )
     parser.add_argument("--profile")
-    parser.add_argument(
-        "--stack-name",
-        default="mortgage-assistant-workshop",
-        help="Lab 00 CloudFormation stack name.",
-    )
     parser.add_argument("--table-name")
     parser.add_argument("--vector-index-name")
     parser.add_argument("--actor-id")
-    parser.add_argument("--embedding-model-id")
+    parser.add_argument(
+        "--embedding-model-id",
+        default=DEFAULT_EMBEDDING_MODEL_ID,
+    )
     parser.add_argument("--sessions", action="store_true")
     parser.add_argument("--memories", action="store_true")
     parser.add_argument("--search")
@@ -147,23 +152,16 @@ def main() -> int:
 
     try:
         session = boto3.Session(profile_name=args.profile, region_name=args.region)
-        table_name = args.table_name or stack_output(
-            session,
-            args.region,
-            args.stack_name,
-            "MemoryTableName",
+        ssm_client = session.client("ssm", region_name=args.region)
+        table_name = resource_name(
+            args.table_name,
+            ssm_client,
+            MEMORY_TABLE_PARAMETER_NAME,
         )
-        vector_index_name = args.vector_index_name or stack_output(
-            session,
-            args.region,
-            args.stack_name,
-            "MemoryVectorIndexName",
-        )
-        embedding_model_id = args.embedding_model_id or stack_output(
-            session,
-            args.region,
-            args.stack_name,
-            "MemoryEmbeddingModelId",
+        vector_index_name = resource_name(
+            args.vector_index_name,
+            ssm_client,
+            MEMORY_VECTOR_INDEX_PARAMETER_NAME,
         )
         actor_id = args.actor_id or default_actor_id(session)
         partition = f"user/{actor_id}"
@@ -190,7 +188,7 @@ def main() -> int:
                 embed=make_embedder(
                     session,
                     args.region,
-                    embedding_model_id,
+                    args.embedding_model_id,
                 ),
                 wait_seconds=args.wait_seconds,
             )

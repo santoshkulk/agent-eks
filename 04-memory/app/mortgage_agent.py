@@ -17,7 +17,7 @@ MODEL_ID = os.environ.get(
 )
 KB_PARAMETER_NAME = os.environ.get(
     "KB_PARAMETER_NAME",
-    "/app/mortgage_assistant/kb_id",
+    "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
 )
 
 

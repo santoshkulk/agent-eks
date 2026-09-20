@@ -9,7 +9,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 
 DEFAULT_REGION = "us-west-2"
-DEFAULT_PARAMETER_NAME = "/app/mortgage_assistant/kb_id"
+DEFAULT_PARAMETER_NAME = "/workshop/mortgage-assistant/bedrock/knowledge-base-id"
 
 
 def create_session(profile: str | None, region: str) -> boto3.Session:

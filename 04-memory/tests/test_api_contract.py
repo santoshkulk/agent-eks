@@ -11,12 +11,23 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
 
+import mortgage_agent  # noqa: E402
 import mortgage_api  # noqa: E402
 
 
 class ApiContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(mortgage_api.app)
+
+    def test_canonical_model_and_knowledge_base_defaults(self) -> None:
+        self.assertEqual(
+            mortgage_agent.MODEL_ID,
+            "us.anthropic.claude-sonnet-4-6",
+        )
+        self.assertEqual(
+            mortgage_agent.KB_PARAMETER_NAME,
+            "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
+        )
 
     @patch("mortgage_api.run_prompt", return_value="remembered response")
     def test_invoke_returns_actor_and_session(self, run_prompt) -> None:

@@ -106,9 +106,9 @@ lab begins:
 - The application EKS Pod Identity role.
 - AWS Load Balancer Controller.
 
-Participants must not run `00-workshop-setup`. Lab 03 builds and deploys the
-application resources into the Workshop Studio environment. It does not create
-a new EKS cluster or Knowledge Base.
+Lab 03 consumes these pre-provisioned resources through stable Workshop
+Studio interfaces and deploys only the application resources. It does not
+create a new EKS cluster or Knowledge Base.
 
 ### Where FastAPI sits and why it is used
 
@@ -373,9 +373,11 @@ the application to:
 
 `scripts/deploy-application.sh` automates the application deployment:
 
-1. Reads the EKS cluster name from `/workshop/lab3/cluster-name` and the ECR
-   repository URI from `/workshop/lab3/repository-uri` in SSM Parameter Store.
-2. Uses defaults for `MODEL_ID` and `KB_PARAMETER_NAME` unless you override
+1. Reads the EKS cluster name from `/workshop/mortgage-assistant/eks/cluster-name` and the ECR
+   repository URI from `/workshop/mortgage-assistant/ecr/repository-uri` in SSM Parameter Store.
+2. Defaults `MODEL_ID` to `us.anthropic.claude-sonnet-4-6` and
+   `KB_PARAMETER_NAME` to
+   `/workshop/mortgage-assistant/bedrock/knowledge-base-id` unless you override
    those environment variables.
 3. Detects or accepts the allowed source CIDR.
 4. Configures the local `kubectl` context.
@@ -500,8 +502,9 @@ You also need:
   infrastructure.
 
 The scripts use the default AWS CLI profile unless `--profile` is provided.
-Do not run `00-workshop-setup`; Workshop Studio has already provisioned the
-required infrastructure.
+Workshop Studio has already provisioned the required AWS infrastructure. The
+deployment script discovers the environment through the documented SSM
+parameters and does not require a CloudFormation stack name or outputs.
 
 ## Step 1: Review the Lab 03 files
 
@@ -1077,21 +1080,22 @@ The prompt must contain between 1 and 4,000 characters.
 
 ### The required Workshop Studio SSM parameters cannot be read
 
-Confirm that both required parameters exist in the selected Region and contain
+Confirm that the required parameters exist in the selected Region and contain
 values:
 
 ```bash
 aws ssm get-parameters \
   --region us-west-2 \
   --names \
-    /workshop/lab3/cluster-name \
-    /workshop/lab3/repository-uri \
+    /workshop/mortgage-assistant/eks/cluster-name \
+    /workshop/mortgage-assistant/ecr/repository-uri \
+    /workshop/mortgage-assistant/bedrock/knowledge-base-id \
   --query 'Parameters[].{Name:Name,Value:Value}'
 ```
 
-The response must contain both parameter names. If either parameter is missing
-or empty, confirm that the Workshop Studio foundation setup completed for your
-participant environment. Do not run `00-workshop-setup`.
+The response must contain all three parameter names. If a parameter is missing
+or empty, confirm that Workshop Studio finished provisioning the participant
+environment.
 
 ### kubectl cannot connect to EKS
 
@@ -1100,7 +1104,7 @@ Read the cluster name from SSM and refresh the local kubeconfig:
 ```bash
 CLUSTER_NAME="$(aws ssm get-parameter \
   --region us-west-2 \
-  --name /workshop/lab3/cluster-name \
+  --name /workshop/mortgage-assistant/eks/cluster-name \
   --query Parameter.Value \
   --output text)"
 
@@ -1295,7 +1299,7 @@ association exists:
 ```bash
 CLUSTER_NAME="$(aws ssm get-parameter \
   --region us-west-2 \
-  --name /workshop/lab3/cluster-name \
+  --name /workshop/mortgage-assistant/eks/cluster-name \
   --query Parameter.Value \
   --output text)"
 
@@ -1419,8 +1423,7 @@ infrastructure, and other Workshop Studio foundation resources remain until
 the participant environment ends.
 
 Workshop Studio automatically deletes the temporary participant account and
-its remaining resources when the environment is terminated. No
-`00-workshop-setup` cleanup script is required.
+its remaining resources when the environment is terminated.
 
 ## Completion checkpoint
 
