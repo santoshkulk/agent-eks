@@ -1,0 +1,320 @@
+import argparse
+import logging
+import os
+import time
+import uuid
+from datetime import date, timedelta
+from functools import lru_cache
+
+import boto3
+from strands import Agent, tool
+from strands_tools import calculator, retrieve
+
+import telemetry
+from memory import create_memory_components, validate_identifier
+
+
+# Configure tracing as early as possible so every Agent created below,
+# including from the CLI entry point, can be instrumented.
+telemetry.init_telemetry()
+
+MODEL_ID = os.environ.get(
+    "MODEL_ID",
+    "us.anthropic.claude-sonnet-4-6",
+)
+KB_PARAMETER_NAME = os.environ.get(
+    "KB_PARAMETER_NAME",
+    "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
+)
+
+
+def configure_logging() -> None:
+    for logger_name in (
+        "strands",
+        "strands.agent",
+        "strands.tools",
+        "strands.models",
+        "strands.bedrock",
+    ):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                )
+            )
+            logger.addHandler(handler)
+
+
+@lru_cache(maxsize=1)
+def get_knowledge_base_id() -> str:
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    try:
+        parameter = boto3.client("ssm", region_name=region).get_parameter(
+            Name=KB_PARAMETER_NAME
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"Unable to retrieve the Knowledge Base ID from "
+            f"{KB_PARAMETER_NAME}: {error}"
+        ) from error
+
+    knowledge_base_id = parameter["Parameter"]["Value"].strip()
+    if not knowledge_base_id:
+        raise RuntimeError(f"SSM parameter {KB_PARAMETER_NAME} is empty")
+
+    os.environ["KNOWLEDGE_BASE_ID"] = knowledge_base_id
+    return knowledge_base_id
+
+
+def _fault_injection_enabled() -> bool:
+    return os.environ.get("FAULT_INJECTION_ENABLED", "false").strip().lower() == "true"
+
+
+def maybe_inject_fault(tool_name: str) -> None:
+    """Optionally delay or fail a tool call for the fault-injection exercise.
+
+    Every environment variable is read fresh on each call, so the exercise
+    can be toggled on and off (for example with `kubectl set env`) without
+    rebuilding or restarting the container image.
+    """
+    if not _fault_injection_enabled():
+        return
+    target_tool = os.environ.get("FAULT_INJECTION_TOOL", "get_mortgage_details").strip()
+    if target_tool != tool_name:
+        return
+
+    mode = os.environ.get("FAULT_INJECTION_MODE", "delay").strip().lower()
+    telemetry.record_fault_injection(tool_name, mode)
+
+    if mode == "error":
+        raise RuntimeError(f"Fault injection: simulated failure in tool '{tool_name}'.")
+
+    delay_seconds = float(os.environ.get("FAULT_INJECTION_DELAY_SECONDS", "5"))
+    time.sleep(delay_seconds)
+
+
+@tool
+def answer_general_mortgage_questions(query: str) -> str:
+    """Answer general mortgage questions using the workshop Knowledge Base."""
+    get_knowledge_base_id()
+    agent = Agent(
+        model=MODEL_ID,
+        tools=[retrieve],
+        trace_attributes=telemetry.current_trace_attributes(),
+        system_prompt="""
+        You are a mortgage information assistant.
+
+        Always use the retrieve tool before answering a mortgage question.
+        Answer only from information returned by the workshop Knowledge Base.
+        If the Knowledge Base does not contain the answer, say "I don't know."
+        Explain concepts in plain language, present balanced tradeoffs, and make
+        it clear that general information is not personalized financial advice.
+        """,
+    )
+    return str(agent(query))
+
+
+@tool
+def get_mortgage_details(customer_id: str) -> dict:
+    """Return mock existing-mortgage data for the workshop."""
+    maybe_inject_fault("get_mortgage_details")
+    today = date.today()
+    return {
+        "account_number": customer_id,
+        "outstanding_principal": 150000.0,
+        "interest_rate": 4.5,
+        "maturity_date": "2030-06-30",
+        "payments_remaining": 72,
+        "last_payment_date": str(today - timedelta(days=30)),
+        "next_payment_due": str(today + timedelta(days=1)),
+        "next_payment_amount": 1250.0,
+    }
+
+
+@tool
+def answer_existing_mortgage_questions(query: str) -> str:
+    """Answer questions about a mock customer's existing mortgage."""
+    agent = Agent(
+        model=MODEL_ID,
+        tools=[get_mortgage_details],
+        trace_attributes=telemetry.current_trace_attributes(),
+        system_prompt="""
+        You are an existing-mortgage assistant.
+
+        Ask for a customer ID before using the mortgage-details tool. Explain
+        balances, rates, payment dates, and payoff information clearly. The
+        returned account data is mock workshop data. Do not invent account
+        information that was not returned by a tool.
+        """,
+    )
+    return str(agent(query))
+
+
+@tool
+def get_mortgage_app_doc_status(customer_id: str | None = None) -> list[dict]:
+    """Return mock required-document status for a mortgage application."""
+    return [
+        {"type": "proof_of_income", "status": "COMPLETED"},
+        {"type": "employment_information", "status": "MISSING"},
+        {"type": "proof_of_assets", "status": "COMPLETED"},
+        {"type": "credit_information", "status": "COMPLETED"},
+    ]
+
+
+@tool
+def get_application_details(customer_id: str | None = None) -> dict:
+    """Return mock details about a mortgage application."""
+    return {
+        "customer_id": customer_id or "123456",
+        "application_id": "998776",
+        "application_date": str(date.today() - timedelta(days=35)),
+        "application_status": "IN_PROGRESS",
+        "application_type": "NEW_MORTGAGE",
+        "name": "Workshop Customer",
+    }
+
+
+@tool
+def create_customer_id() -> str:
+    """Create a mock customer ID."""
+    return "123456"
+
+
+@tool
+def create_loan_application(
+    customer_id: str,
+    name: str,
+    age: int,
+    annual_income: int,
+    annual_expense: int,
+) -> str:
+    """Create a mock loan application."""
+    return (
+        f"Loan application created for {name} (customer {customer_id}); "
+        f"age={age}, annual_income={annual_income}, "
+        f"annual_expense={annual_expense}."
+    )
+
+
+@tool
+def answer_new_loan_application_questions(query: str) -> str:
+    """Handle new mortgage application questions."""
+    agent = Agent(
+        model=MODEL_ID,
+        tools=[
+            get_mortgage_app_doc_status,
+            get_application_details,
+            create_customer_id,
+            create_loan_application,
+        ],
+        trace_attributes=telemetry.current_trace_attributes(),
+        system_prompt="""
+        You are a new mortgage application assistant.
+
+        Ask for a customer ID first and create one if necessary. Collect name,
+        age, annual income, and annual expenses one question at a time before
+        creating an application. Use tools for all application data and never
+        invent information that was not returned by a tool.
+        """,
+    )
+    return str(agent(query))
+
+
+def create_supervisor_agent(actor_id: str, session_id: str, request_id: str) -> Agent:
+    session_manager, memory_manager = create_memory_components(
+        actor_id=actor_id,
+        session_id=session_id,
+    )
+    attributes = telemetry.trace_attributes(actor_id, session_id, request_id)
+    # Specialist agents are created inside the @tool functions above, which
+    # have no direct access to actor/session/request IDs. Stashing the same
+    # attributes in a context variable lets those tool functions tag their
+    # own agents so every span in the request shares one actor/session
+    # grouping in Langfuse, regardless of which EKS replica handles it.
+    telemetry.set_current_trace_attributes(attributes)
+    return Agent(
+        model=MODEL_ID,
+        session_manager=session_manager,
+        memory_manager=memory_manager,
+        tools=[
+            answer_general_mortgage_questions,
+            answer_existing_mortgage_questions,
+            answer_new_loan_application_questions,
+            calculator,
+        ],
+        trace_attributes=attributes,
+        system_prompt="""
+        You are the supervisor for a mortgage assistant.
+
+        Route general mortgage information questions to the general mortgage
+        tool, existing-account questions to the existing mortgage tool, and new
+        application questions to the application tool. Use the calculator for
+        calculations. Present the selected tool's result as one clear response.
+
+        You have short-term conversation state and durable long-term memory.
+        Use remembered information only when it is relevant to the current
+        request. When the user explicitly asks you to remember something, or
+        states a durable mortgage goal or preference, use add_memory to store one
+        concise, standalone fact. Durable examples include a preferred loan
+        term, fixed-versus-variable preference, approximate property-price
+        range, deposit goal, payment priority, refinancing objective, or
+        application timeline.
+
+        Never add customer IDs, account numbers, authentication data, exact
+        income, uploaded documents, or other sensitive financial identifiers to
+        long-term memory. Do not claim to remember information unless it appears
+        in the active session or was returned by the memory tools.
+        """,
+    )
+
+
+def run_prompt(prompt: str, actor_id: str, session_id: str, request_id: str) -> str:
+    if not prompt or not prompt.strip():
+        raise ValueError("Prompt must not be empty")
+    validated_actor_id = validate_identifier(actor_id, "actor_id")
+    validated_session_id = validate_identifier(session_id, "session_id")
+    return str(
+        create_supervisor_agent(
+            actor_id=validated_actor_id,
+            session_id=validated_session_id,
+            request_id=request_id,
+        )(prompt.strip())
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Mortgage Assistant Agent")
+    parser.add_argument(
+        "--prompt",
+        "-p",
+        required=True,
+        help="Prompt to send to the mortgage assistant.",
+    )
+    parser.add_argument(
+        "--actor-id",
+        default="local-workshop-user",
+        help="Stable workshop user identifier.",
+    )
+    parser.add_argument(
+        "--session-id",
+        default="local-session",
+        help="Conversation identifier.",
+    )
+    args = parser.parse_args()
+    configure_logging()
+    print(
+        run_prompt(
+            args.prompt,
+            args.actor_id,
+            args.session_id,
+            request_id=str(uuid.uuid4()),
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

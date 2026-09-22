@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mortgage-assistant
+  namespace: mortgage-assistant
+  labels:
+    app.kubernetes.io/name: mortgage-assistant
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mortgage-assistant
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mortgage-assistant
+    spec:
+      serviceAccountName: mortgage-assistant
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload: mortgage-assistant
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mortgage-assistant
+          image: __IMAGE_URI__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AWS_REGION
+              value: __AWS_REGION__
+            - name: AWS_DEFAULT_REGION
+              value: __AWS_REGION__
+            - name: MODEL_ID
+              value: __MODEL_ID__
+            - name: KB_PARAMETER_NAME
+              value: __KB_PARAMETER_NAME__
+            - name: MEMORY_TABLE_NAME
+              value: __MEMORY_TABLE_NAME__
+            - name: MEMORY_VECTOR_INDEX_NAME
+              value: __MEMORY_VECTOR_INDEX_NAME__
+            - name: MEMORY_EMBEDDING_MODEL_ID
+              value: __MEMORY_EMBEDDING_MODEL_ID__
+            - name: MEMORY_SESSION_TTL_SECONDS
+              value: "__MEMORY_SESSION_TTL_SECONDS__"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: OTEL_SERVICE_NAME
+              value: mortgage-assistant
+            - name: TELEMETRY_MASK_CONTENT
+              value: "__TELEMETRY_MASK_CONTENT__"
+            - name: FAULT_INJECTION_ENABLED
+              value: "__FAULT_INJECTION_ENABLED__"
+            - name: FAULT_INJECTION_TOOL
+              value: __FAULT_INJECTION_TOOL__
+            - name: FAULT_INJECTION_MODE
+              value: __FAULT_INJECTION_MODE__
+            - name: FAULT_INJECTION_DELAY_SECONDS
+              value: "__FAULT_INJECTION_DELAY_SECONDS__"
+            - name: MORTGAGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mortgage-assistant-api-key
+                  key: api-key
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-otel-auth
+                  key: otlp-headers
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mortgage-assistant
+  namespace: mortgage-assistant
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mortgage-assistant
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mortgage-assistant
+  namespace: mortgage-assistant
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /health
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  loadBalancerSourceRanges:
+    - __SERVICE_ACCESS_CIDR__
+  selector:
+    app.kubernetes.io/name: mortgage-assistant
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
