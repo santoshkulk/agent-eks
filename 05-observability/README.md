@@ -94,7 +94,6 @@ flowchart TB
         langfuseSecret["Secrets Manager secret<br/>Langfuse credentials"]
         langfuseNlb["Internal Network Load Balancer"]
         langfuseCloudFront["CloudFront distribution<br/>VPC origin"]
-        ssmSession["SSM Session Manager<br/>port-forwarding tunnel (fallback)"]
 
         subgraph langfuse["Docker Compose stack on the Langfuse instance"]
             langfuseWeb["langfuse-web + langfuse-worker"]
@@ -127,11 +126,9 @@ flowchart TB
     telemetry1 -->|"OTLP/HTTP, private VPC connectivity"| langfuseEc2
     telemetry2 -->|"OTLP/HTTP, private VPC connectivity"| langfuseEc2
     langfuseEc2 -.->|reads/writes credentials| langfuseSecret
-    client -->|"HTTPS<br/>(primary UI access)"| langfuseCloudFront
+    client -->|"HTTPS<br/>(UI access)"| langfuseCloudFront
     langfuseCloudFront -->|VPC origin, HTTP| langfuseNlb
     langfuseNlb --> langfuseEc2
-    client -.->|"aws ssm start-session<br/>(fallback UI access)"| ssmSession
-    ssmSession -.-> langfuseEc2
 ```
 
 The existing Bedrock Knowledge Base, DynamoDB memory table, and mortgage
@@ -270,8 +267,7 @@ kubectl get deployment,pods,service \
 
 You also need:
 
-- AWS CLI v2, including the Session Manager plugin for `aws ssm
-  start-session`.
+- AWS CLI v2.
 - `kubectl`.
 - Docker with Buildx, or Finch's Docker-compatible CLI.
 - `uv`.
@@ -314,8 +310,7 @@ Compose, with an encrypted root EBS volume (default 100 GiB) for durable
 storage across reboots. The instance itself has no direct public inbound
 access. A CloudFront distribution reaches it through a VPC origin
 targeting an internal Network Load Balancer, giving you a public HTTPS URL
-for the UI in Step 5 below; an SSM Session Manager tunnel is also available
-as a fallback.
+for the UI in Step 5 below.
 
 ## Step 1: Review the Lab 05 files
 
@@ -468,23 +463,6 @@ python3 -c 'import json,sys; c=json.load(sys.stdin); print("Email:", c["init_use
 The Langfuse instance itself still has no direct public inbound access —
 CloudFront reaches it over a private VPC origin. Langfuse's Tracing view is
 where you will read each trace for the remaining exercises.
-
-**Alternative: SSM Session Manager tunnel.** If you'd rather bypass
-CloudFront entirely, forward a local port to the instance directly:
-
-```bash
-aws ssm start-session \
-  --region us-west-2 \
-  --target "$(aws ssm get-parameter \
-    --region us-west-2 \
-    --name /workshop/mortgage-assistant/langfuse/instance-id \
-    --query 'Parameter.Value' --output text)" \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
-```
-
-Leave that command running in its own terminal, then browse to
-`http://localhost:3000`.
 
 ## Step 6 — Exercise 1: A general mortgage question
 
@@ -738,14 +716,6 @@ Confirm you browsed to the exact URL from the
 `/workshop/mortgage-assistant/langfuse/url` parameter, over `https://`. A
 new CloudFront distribution can take several minutes to fully propagate; if
 it was just created, wait and retry before assuming something is broken.
-As a fallback, use the SSM Session Manager tunnel from Step 5 to confirm
-the Langfuse instance itself is healthy.
-
-### The Langfuse UI will not load after `aws ssm start-session`
-
-Confirm the tunnel command is still running in its terminal and that you
-browsed to `http://localhost:3000` (not `https://`). If the session ends
-unexpectedly, re-run the `aws ssm start-session` command from Step 5.
 
 ### Fault injection does not appear to change anything
 

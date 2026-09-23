@@ -352,17 +352,6 @@ credentials secret for the email/password). CloudFront reaches the
 Langfuse instance through a private VPC origin, so the instance itself
 still has no direct public inbound access.
 
-Alternative: to bypass CloudFront and reach the instance directly, forward
-a local port over SSM Session Manager instead:
-  aws ssm start-session \\
-    --region $REGION \\
-    --target \$(aws ssm get-parameter --region $REGION \\
-      --name /workshop/mortgage-assistant/langfuse/instance-id \\
-      --query 'Parameter.Value' --output text) \\
-    --document-name AWS-StartPortForwardingSession \\
-    --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
-Then browse to http://localhost:3000.
-
 Start the observability exercises:
   cd 05-observability
   python3 app/invoke_eks.py --region $REGION --prompt \\

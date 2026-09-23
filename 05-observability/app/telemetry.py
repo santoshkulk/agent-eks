@@ -10,7 +10,7 @@ application.
 Configuration is entirely environment-driven and optional:
 
 - OTEL_EXPORTER_OTLP_ENDPOINT   Langfuse OTLP/HTTP endpoint, for example
-                                 http://<langfuse-host>:3000/api/public/otel
+                                 http://<langfuse-host>:3000/api/public/otel/v1/traces
 - OTEL_EXPORTER_OTLP_HEADERS    "Authorization=Basic <base64>,x-langfuse-ingestion-version=4"
 - OTEL_SERVICE_NAME             Resource service name (default: mortgage-assistant)
 - TELEMETRY_MASK_CONTENT        "true" to redact prompt/response attribute
