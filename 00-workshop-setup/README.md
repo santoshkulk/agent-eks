@@ -22,7 +22,16 @@ From the repository root:
 The script uses the default AWS CLI profile unless `--profile` is provided.
 It provisions the DynamoDB memory table, uploads the mortgage documents, waits
 for ingestion, configures `kubectl`, and installs the load balancer controller.
-It does not deploy the application.
+It does not deploy the mortgage application.
+
+## Lab 5 and Lab 6 limitations
+
+This standalone setup does not provision the self-hosted Langfuse stack used
+by Lab 5. It also does not build or deploy the provider-owned
+`credit-services/credit-score-mcp` workload or publish
+`/workshop/mortgage-assistant/mcp/credit-score-url`. Labs 5 and 6 require a
+Workshop Studio-provisioned environment. Do not substitute an arbitrary MCP
+endpoint or modify another provider to work around this limitation.
 
 To remove all workshop resources:
 
