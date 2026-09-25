@@ -1,6 +1,6 @@
-# Lab 6: Integrate a credit-score MCP tool
+# Lab 6: Integrate MCP Tools with the Strands Agent
 
-Lab 6 is a complete checkpoint of the instrumented mortgage assistant from Lab 05.
+Lab 6 is a complete checkpoint of the instrumented mortgage assistant from Lab 05. Participants first initialize the installed MCP server, list and call its tool independently, then integrate that remote capability with the Strands supervisor and deploy the changed agent.
 It preserves the FastAPI service, three mortgage specialists, calculator,
 DynamoDB session snapshots, semantic long-term memory, OpenTelemetry tracing
 to self-hosted Langfuse, participant state client, inspection and hydration
@@ -76,7 +76,9 @@ credit-services/service/credit-score-mcp:8081
 ```
 
 Workshop Studio owns that namespace, Deployment, Service, endpoint, and any
-provider configuration. Lab 6 owns the `mortgage-assistant` namespace and
+provider configuration. In another organization the provider could be maintained by a separate team and run in another account, network, or EKS cluster. The workshop simulates that lifecycle boundary with a separate namespace in the same cluster; it is not hard isolation.
+
+Lab 6 owns the `mortgage-assistant` namespace and
 continues to replace the earlier checkpoint's consumer Deployment in place.
 The existing service account, API-key Secret, and NLB Service names are
 preserved.
@@ -279,7 +281,7 @@ The deployment script:
 5. builds and pushes a Linux AMD64 image tagged
    `lab06-agent-<UTC timestamp>`;
 6. applies only consumer-owned Kubernetes resources;
-7. reuses the existing API-key and Langfuse OTLP Secrets;
+7. reapplies the API-key Secret, retaining its existing value unless explicitly overridden, and reads the existing Langfuse OTLP Secret without reapplying it;
 8. injects MCP, OTLP, content-masking, and fault-injection configuration into
    both application replicas;
 9. waits for rollout, NLB discovery, and readiness; and
@@ -320,8 +322,9 @@ Existing routes remain unchanged:
 - `POST /invoke`
 
 `POST /invoke` still requires `prompt`, `actor_id`, and `session_id` and returns
-a nullable `trace_id`. Readiness reports only that MCP is configured and does
-not expose the endpoint URL or perform live MCP discovery.
+a nullable `trace_id`. For MCP readiness, the endpoint checks the configured
+fixed URL without opening a live connection; it also resolves the Knowledge
+Base ID and reports model/memory configuration.
 
 ## Preserved Lab 05 memory operations
 

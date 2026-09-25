@@ -1,4 +1,4 @@
-# AWS Mortgage Assistant Workshop
+# Build and deploy Strands agents to Amazon EKS
 
 This repository contains complete participant checkpoints for building a Strands mortgage assistant, deploying it to Amazon EKS, adding DynamoDB-backed memory, instrumenting it with OpenTelemetry traces exported to self-hosted Langfuse, and integrating a provider-owned Model Context Protocol (MCP) tool.
 
@@ -9,12 +9,12 @@ Workshop Studio events provision the shared AWS environment, self-hosted Langfus
 | Lab | Module | Outcome |
 | --- | --- | --- |
 | 0 | `00-workshop-setup` | Optional standalone setup for shared Knowledge Base, EKS, ECR, IAM, load-balancing, and DynamoDB memory resources. |
-| 1 | `01-test-knowledge-base` | Query the Knowledge Base directly and inspect retrieved chunks. |
+| 1 | `01-test-knowledge-base` and Lab 6 explorer | Query the Knowledge Base, inspect EKS, and independently initialize/list/call the installed MCP server. |
 | 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally. |
 | 3 | `03-eks-service` | Deploy the assistant as a persistent two-replica FastAPI service on EKS. |
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB. |
 | 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
-| 6 | `06-mcp-credit-score` | Preserve Langfuse tracing, discover one provider-owned MCP tool, and deploy the integrated consumer over the existing EKS workload. |
+| 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
 
@@ -32,7 +32,7 @@ Lab 4 updates those resources in place and adds:
 Lab 5 updates the memory-enabled service with OpenTelemetry/Langfuse tracing,
 request correlation, content masking, and controlled fault injection.
 
-Lab 6 is a complete checkpoint of Lab 5 that adds:
+Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MCP server independently, then the application adds:
 
 - `mcp==2.1.1` and Streamable HTTP.
 - A fixed-target explorer for info, discovery, schema inspection, invocation, and live contract verification.
@@ -40,7 +40,7 @@ Lab 6 is a complete checkpoint of Lab 5 that adds:
 - Exact validation that the provider exposes only `get_credit_score`.
 - A synthetic score of `80` that is explicitly not a lending decision.
 
-Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. Provider failure therefore affects all invocation routes. `GET /health/ready` checks only that the configured provider URL is the fixed expected value; the explorer `verify` operation performs the live protocol and tool-contract check.
+Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. Provider failure therefore affects all invocation routes. For MCP, `GET /health/ready` checks the fixed configured URL identity without connecting to the server; it also resolves the Knowledge Base ID. The explorer `verify` operation performs the live protocol and tool-contract check.
 
 ## Provider Ownership
 
@@ -66,7 +66,9 @@ aws configure get region
 
 Use only synthetic workshop data.
 
-## Lab 1: Test Knowledge Base Retrieval
+## Lab 1: Explore the Provisioned Environment
+
+Query the Knowledge Base directly:
 
 ```bash
 cd 01-test-knowledge-base
@@ -74,6 +76,8 @@ uv sync --frozen
 uv run query_knowledge_base.py \
   --query "What are the benefits of a 15-year mortgage?"
 ```
+
+The Workshop Studio Lab 1 pages also inspect EKS and use the fixed-target Lab 6 explorer to initialize the installed MCP server, list and inspect `get_credit_score`, call it with a synthetic ID, and run `verify` before any agent integration.
 
 ## Lab 2: Run the Local Strands Application
 
@@ -118,7 +122,7 @@ uv run --frozen python -m unittest discover --start-directory tests --verbose
 
 See [`05-observability/README.md`](05-observability/README.md) for trace correlation, content masking, controlled fault injection, and Langfuse exercises.
 
-## Lab 6: Integrate the Credit-Score MCP Tool
+## Lab 6: Integrate MCP Tools with the Strands Agent
 
 ```bash
 cd ../06-mcp-credit-score
@@ -149,7 +153,7 @@ python3 app/invoke_eks.py \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```
 
-The deployment preserves the existing `mortgage-assistant` NLB, Service, service account, API-key and Langfuse OTLP Secrets, Pod Identity association, Knowledge Base, DynamoDB memory resources, and OpenTelemetry configuration. It verifies but does not modify `credit-services`.
+The deployment preserves the existing `mortgage-assistant` NLB, Service, service account, Pod Identity association, Knowledge Base, DynamoDB memory resources, and OpenTelemetry configuration. It reapplies the API-key Secret while retaining its value unless explicitly overridden, and reads the existing Langfuse OTLP Secret without reapplying it. It verifies but does not modify `credit-services`.
 
 See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and consumer-only cleanup exercises.
 
