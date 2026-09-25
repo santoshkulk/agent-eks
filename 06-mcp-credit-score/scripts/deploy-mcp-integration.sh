@@ -31,7 +31,7 @@ Usage: 06-mcp-credit-score/scripts/deploy-mcp-integration.sh [options]
 Options:
   --region REGION                    AWS Region (default: us-west-2).
   --profile PROFILE                  AWS CLI profile; omit to use the default profile.
-  --service-access-cidr CIDR         CIDR allowed to invoke the consumer API.
+  --service-access-cidr CIDR         CIDR allowed to invoke the mortgage-assistant API.
   --session-ttl-seconds N            Short-term session retention (default: 604800).
   --prompt TEXT                      Explicit synthetic credit-score smoke-test prompt.
   --telemetry-mask-content           Redact prompt/response span attributes before export.
@@ -119,7 +119,7 @@ LANGFUSE_OTLP_ENDPOINT="$(ssm_parameter "$LANGFUSE_OTLP_ENDPOINT_PARAMETER_NAME"
 LANGFUSE_URL="$(ssm_parameter "$LANGFUSE_URL_PARAMETER_NAME")"
 
 if [[ "$CREDIT_SCORE_MCP_URL" != "$EXPECTED_CREDIT_SCORE_MCP_URL" ]]; then
-  echo "SSM parameter $CREDIT_SCORE_MCP_PARAMETER_NAME does not identify the expected provider Service." >&2
+  echo "SSM parameter $CREDIT_SCORE_MCP_PARAMETER_NAME does not identify the expected credit-score MCP Service." >&2
   exit 1
 fi
 if [[ -z "$KNOWLEDGE_BASE_ID" ]]; then
@@ -153,7 +153,7 @@ if ! kubectl rollout status \
   exit 1
 fi
 
-echo "Verifying the provider-owned credit-score MCP service"
+echo "Verifying the pre-provisioned credit-score MCP server managed by the credit-services team"
 kubectl get deployment credit-score-mcp \
   --namespace credit-services >/dev/null
 kubectl rollout status deployment/credit-score-mcp \
@@ -365,7 +365,7 @@ SMOKE_TRACE_ID="$(python3 -c \
 
 if [[ -z "$SMOKE_TRACE_ID" ]]; then
   echo "The Lab 6 smoke response did not include a trace_id." >&2
-  echo "Check the OTLP endpoint, langfuse-otel-auth Secret, and consumer logs." >&2
+  echo "Check the OTLP endpoint, langfuse-otel-auth Secret, and mortgage-assistant application logs." >&2
   exit 1
 fi
 
@@ -377,12 +377,12 @@ Lab 06 completed.
   Memory table: $MEMORY_TABLE_NAME
   Vector index: $MEMORY_VECTOR_INDEX_NAME
   Image: $IMAGE_URI
-  Consumer API endpoint: http://${SERVICE_ENDPOINT}
-  Provider: credit-services/credit-score-mcp:8081
+  Mortgage-assistant API endpoint: http://${SERVICE_ENDPOINT}
+  Credit-score MCP server: credit-services/credit-score-mcp:8081
   Langfuse UI: $LANGFUSE_URL
   Smoke-test trace ID: $SMOKE_TRACE_ID
 
-The provider-owned credit-services resources were verified but not modified.
+The credit-score MCP server resources in credit-services were verified but not modified.
 The existing mortgage-assistant API key and Langfuse OTLP Secret were reused
 and were not printed.
 

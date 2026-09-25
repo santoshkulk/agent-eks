@@ -68,7 +68,7 @@ def wait_for_port_forward(
 
 @contextmanager
 def port_forward(local_port: int) -> Iterator[str]:
-    """Forward the fixed provider Service to a loopback-only local endpoint."""
+    """Forward the fixed credit-score MCP Service to a loopback endpoint."""
     command = [
         "kubectl",
         "port-forward",
@@ -118,7 +118,7 @@ def json_safe(value: Any) -> Any:
 
 
 def validate_tools(tools: list[Any]) -> Any:
-    """Require exactly one provider tool with the workshop contract name."""
+    """Require exactly one MCP server tool with the workshop contract name."""
     names = [tool.name for tool in tools]
     if names != [EXPECTED_TOOL_NAME]:
         found = ", ".join(names) if names else "none"
@@ -130,7 +130,7 @@ def validate_tools(tools: list[Any]) -> Any:
 
 
 async def list_all_tools(session: ClientSession) -> list[Any]:
-    """Read every MCP tool page before validating the provider contract."""
+    """Read every MCP tool page before validating the MCP server contract."""
     result = await session.list_tools()
     tools = list(result.tools)
     cursor = result.next_cursor
@@ -231,13 +231,13 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the fixed-target participant command-line parser."""
     parser = argparse.ArgumentParser(
         description=(
-            "Explore the fixed credit-services/credit-score-mcp provider "
+            "Explore the fixed credit-score MCP server in credit-services "
             "through a temporary loopback port-forward."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("info", help="Show MCP server initialization details.")
-    subparsers.add_parser("list-tools", help="List the provider's tools.")
+    subparsers.add_parser("list-tools", help="List the MCP server's tools.")
     subparsers.add_parser(
         "inspect-tool",
         help="Show the get_credit_score tool schema.",

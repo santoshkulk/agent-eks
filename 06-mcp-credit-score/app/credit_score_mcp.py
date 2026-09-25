@@ -41,7 +41,7 @@ def get_credit_score_mcp_url() -> str:
         )
     if endpoint != EXPECTED_PROVIDER_URL:
         raise CreditScoreMCPError(
-            "CREDIT_SCORE_MCP_URL must identify the fixed workshop provider "
+            "CREDIT_SCORE_MCP_URL must identify the fixed workshop MCP server "
             f"at {EXPECTED_PROVIDER_URL}"
         )
     return endpoint
@@ -53,7 +53,7 @@ def _transport_factory(endpoint: str):
 
 
 def _discover_all_tools(client: MCPClient) -> list[MCPAgentTool]:
-    """Read every provider tool page before enforcing the exact contract."""
+    """Read every MCP server tool page before enforcing the exact contract."""
     page = client.list_tools_sync()
     tools = list(page)
     pagination_token = getattr(page, "pagination_token", None)
@@ -65,12 +65,12 @@ def _discover_all_tools(client: MCPClient) -> list[MCPAgentTool]:
 
 
 def _select_credit_score_tool(tools: list[MCPAgentTool]) -> MCPAgentTool:
-    """Require the provider to expose exactly the expected remote tool."""
+    """Require the MCP server to expose exactly the expected remote tool."""
     tool_names = [tool.tool_name for tool in tools]
     if tool_names != [EXPECTED_TOOL_NAME]:
         found = ", ".join(tool_names) if tool_names else "none"
         raise CreditScoreMCPError(
-            "Credit-score MCP provider must expose exactly one tool named "
+            "Credit-score MCP server must expose exactly one tool named "
             f"{EXPECTED_TOOL_NAME}; found: {found}"
         )
     return tools[0]
@@ -85,7 +85,7 @@ def credit_score_tool() -> Iterator[MCPAgentTool]:
     Strands additionally bounds connection startup to 30 seconds.
     """
     endpoint = get_credit_score_mcp_url()
-    logger.info("Connecting to the configured credit-score MCP provider")
+    logger.info("Connecting to the configured credit-score MCP server")
     client = MCPClient(
         lambda: _transport_factory(endpoint),
         startup_timeout=MCP_STARTUP_TIMEOUT_SECONDS,
@@ -101,7 +101,7 @@ def credit_score_tool() -> Iterator[MCPAgentTool]:
         stack.close()
         logger.error("Credit-score MCP initialization failed", exc_info=True)
         raise CreditScoreMCPError(
-            "The credit-score MCP provider is unavailable or has an invalid contract"
+            "The credit-score MCP server is unavailable or has an invalid contract"
         ) from error
 
     try:

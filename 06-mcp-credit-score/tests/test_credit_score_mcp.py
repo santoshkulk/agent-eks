@@ -44,7 +44,7 @@ class CreditScoreMCPTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 credit_score_mcp.CreditScoreMCPError,
-                "fixed workshop provider",
+                "fixed workshop MCP server",
             ):
                 credit_score_mcp.get_credit_score_mcp_url()
 

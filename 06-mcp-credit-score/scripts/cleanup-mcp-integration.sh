@@ -14,10 +14,10 @@ Options:
   --profile PROFILE  AWS CLI profile; omit to use the default profile.
   -h, --help         Show this help.
 
-This removes the Lab 06 consumer application only, including the namespaced
-API-key and Langfuse OTLP Secrets. It does not delete or modify the
-provider-owned credit-services namespace, the Workshop Studio-managed
-Langfuse infrastructure, or other shared AWS resources.
+This removes the Lab 06 mortgage-assistant application only, including the
+namespaced API-key and Langfuse OTLP Secrets. It does not delete or modify the
+`credit-services` namespace, the Workshop Studio-managed Langfuse
+infrastructure, or other shared AWS resources.
 EOF
 }
 
@@ -48,7 +48,7 @@ if [[ -z "$CLUSTER_NAME" || "$CLUSTER_NAME" == "None" ]]; then
   exit 1
 fi
 
-echo "Removing the Lab 06 consumer application and load balancer"
+echo "Removing the Lab 06 mortgage-assistant application and load balancer"
 aws_cli eks update-kubeconfig \
   --name "$CLUSTER_NAME" \
   --alias "$CLUSTER_NAME" >/dev/null
@@ -57,7 +57,7 @@ kubectl delete namespace mortgage-assistant \
   --wait=true \
   --timeout=15m
 
-echo "Lab 06 consumer application removed."
-echo "The provider-owned credit-services namespace was not modified."
+echo "Lab 06 mortgage-assistant application removed."
+echo "The credit-services namespace was not modified."
 echo "The Workshop Studio-managed Langfuse infrastructure was not modified."
 echo "Shared AWS and DynamoDB resources remain managed by Workshop Studio."

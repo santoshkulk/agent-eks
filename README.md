@@ -1,8 +1,8 @@
 # Build and deploy Strands agents to Amazon EKS
 
-This repository contains complete participant checkpoints for building a Strands mortgage assistant, deploying it to Amazon EKS, adding DynamoDB-backed memory, instrumenting it with OpenTelemetry traces exported to self-hosted Langfuse, and integrating a provider-owned Model Context Protocol (MCP) tool.
+This repository contains complete participant checkpoints for building a Strands mortgage assistant, deploying it to Amazon EKS, adding DynamoDB-backed memory, instrumenting it with OpenTelemetry traces exported to self-hosted Langfuse, and integrating a tool from a pre-provisioned credit-score MCP server managed by the credit-services team.
 
-Workshop Studio events provision the shared AWS environment, self-hosted Langfuse infrastructure, and MCP provider before participants begin. The standalone `00-workshop-setup` module can provision the shared Bedrock, EKS, ECR, load-balancing, and memory resources, but it does not provision the Lab 5 Langfuse stack or Lab 6 credit-score provider.
+Workshop Studio deploys `credit-services` and provisions the shared AWS environment and self-hosted Langfuse infrastructure before participants begin. The standalone `00-workshop-setup` module can provision the shared Bedrock, EKS, ECR, load-balancing, and memory resources, but it does not provision the Lab 5 Langfuse stack or Lab 6 credit-score MCP server.
 
 ## Workshop Modules
 
@@ -20,7 +20,7 @@ Numbered application modules are self-contained checkpoints. Runtime modules do 
 
 ## Application Progression
 
-Lab 3 creates the consumer-owned `mortgage-assistant` namespace, a two-replica Deployment, an NLB-backed Kubernetes Service, an API-key Secret, and health and invocation routes.
+Lab 3 creates the `mortgage-assistant` application namespace, a two-replica Deployment, an NLB-backed Kubernetes Service, an API-key Secret, and health and invocation routes.
 
 Lab 4 updates those resources in place and adds:
 
@@ -37,23 +37,23 @@ Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MC
 - `mcp==2.1.1` and Streamable HTTP.
 - A fixed-target explorer for info, discovery, schema inspection, invocation, and live contract verification.
 - A Strands `MCPClient` opened for each `/invoke` request.
-- Exact validation that the provider exposes only `get_credit_score`.
+- Exact validation that the MCP server exposes only `get_credit_score`.
 - A synthetic score of `80` that is explicitly not a lending decision.
 
-Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. Provider failure therefore affects all invocation routes. For MCP, `GET /health/ready` checks the fixed configured URL identity without connecting to the server; it also resolves the Knowledge Base ID. The explorer `verify` operation performs the live protocol and tool-contract check.
+Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. MCP server failure therefore affects all invocation routes. For MCP, `GET /health/ready` checks the fixed configured URL identity without connecting to the server; it also resolves the Knowledge Base ID. The explorer `verify` operation performs the live protocol and tool-contract check.
 
-## Provider Ownership
+## MCP Server Ownership
 
-Workshop Studio owns and provisions:
+Workshop Studio deploys `credit-services` before participants begin and provisions:
 
 ```text
 credit-services/service/credit-score-mcp:8081
 http://credit-score-mcp.credit-services.svc.cluster.local:8081/mcp
 ```
 
-Participants may inspect and call the provider, but must not modify, restart, replace, or delete its namespace, Deployment, pods, Service, endpoint, image, or configuration. Broad workshop permissions do not transfer ownership.
+Participants may inspect and call the MCP server, but must not modify, restart, scale, replace, or delete its namespace, Deployment, pods, Service, endpoint, image, or configuration. Broad workshop permissions do not transfer ownership. The credit-services team manages the MCP server. In production, another organizational team could own and maintain it in another account, network, or EKS cluster.
 
-The standalone `00-workshop-setup` path does not create this provider or the `/workshop/mortgage-assistant/mcp/credit-score-url` Parameter Store value. Lab 6 requires a Workshop Studio-provisioned environment.
+The standalone `00-workshop-setup` path does not create this MCP server or the `/workshop/mortgage-assistant/mcp/credit-score-url` Parameter Store value. Lab 6 requires a Workshop Studio-provisioned environment.
 
 ## Prerequisites
 
@@ -97,7 +97,7 @@ uv run app/invoke_eks.py \
   --prompt "When does refinancing make sense?"
 ```
 
-The script discovers provisioned resources, builds and pushes a `linux/amd64` image, applies consumer Kubernetes resources, waits for two ready replicas and the NLB, and runs a smoke request.
+The script discovers provisioned resources, builds and pushes a `linux/amd64` image, applies `mortgage-assistant` Kubernetes resources, waits for two ready replicas and the NLB, and runs a smoke request.
 
 ## Lab 4: Add Memory
 
@@ -129,7 +129,7 @@ uv run python -m unittest discover \
   --verbose
 ```
 
-Explore the pre-provisioned fixed provider:
+Explore the credit-score MCP server:
 
 ```bash
 uv run scripts/explore_credit_score_mcp.py info
@@ -141,7 +141,7 @@ uv run scripts/explore_credit_score_mcp.py \
 uv run scripts/explore_credit_score_mcp.py verify
 ```
 
-Deploy only the updated consumer and invoke it:
+Deploy only the updated `mortgage-assistant` application and invoke it:
 
 ```bash
 ./scripts/deploy-mcp-integration.sh --region us-west-2
@@ -152,7 +152,7 @@ uv run app/invoke_eks.py \
 
 The deployment preserves the existing `mortgage-assistant` NLB, Service, service account, Pod Identity association, Knowledge Base, DynamoDB memory resources, and OpenTelemetry configuration. It reapplies the API-key Secret while retaining its value unless explicitly overridden, and reads the existing Langfuse OTLP Secret without reapplying it. It verifies but does not modify `credit-services`.
 
-See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and consumer-only cleanup exercises.
+See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and `mortgage-assistant`-only cleanup exercises.
 
 ## Standalone Setup Limitation
 
@@ -164,11 +164,11 @@ To provision only the shared base resources outside Workshop Studio:
 
 This is sufficient for Labs 1 through 4. It is not sufficient for Lab 5 or
 Lab 6 because it does not provision the self-hosted Langfuse stack or the
-provider-owned MCP service. Do not substitute another MCP URL or deploy an ad
-hoc provider; use a Workshop Studio-provisioned environment for those labs.
+credit-score MCP server. Do not substitute another MCP URL or deploy an ad
+hoc MCP server; use a Workshop Studio-provisioned environment for those labs.
 
 ## Cleanup
 
-Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only the consumer `mortgage-assistant` namespace and NLB. It leaves provider-owned `credit-services` and shared AWS resources unchanged.
+Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
 
 Shared infrastructure cleanup is destructive and charge-impacting. Run it only in a standalone environment you intentionally provisioned and only after confirming the AWS account and Region.

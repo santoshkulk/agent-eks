@@ -1,11 +1,11 @@
 # Lab 6: Integrate MCP Tools with the Strands Agent
 
-Lab 6 is a complete checkpoint of the instrumented mortgage assistant from Lab 05. Participants first initialize the installed MCP server, list and call its tool independently, then integrate that remote capability with the Strands supervisor and deploy the changed agent.
+Lab 6 is a complete checkpoint of the instrumented mortgage assistant from Lab 05. Participants first initialize a pre-provisioned credit-score MCP server managed by the credit-services team, list and call its tool independently, then integrate that remote capability with the Strands supervisor and deploy the changed agent.
 It preserves the FastAPI service, three mortgage specialists, calculator,
 DynamoDB session snapshots, semantic long-term memory, OpenTelemetry tracing
 to self-hosted Langfuse, participant state client, inspection and hydration
 utilities, two EKS replicas, and the existing Network Load Balancer. It adds
-one provider-owned Model Context Protocol (MCP) tool named
+one remote Model Context Protocol (MCP) tool named
 `get_credit_score`.
 
 This directory is self-contained. Runtime modules do not import files from an
@@ -28,13 +28,13 @@ flowchart LR
     pod1 --> langfuse[Self-hosted Langfuse OTLP endpoint]
     pod2 --> langfuse
 
-    subgraph consumer[Consumer-owned mortgage-assistant namespace]
+    subgraph consumer[Mortgage-assistant application namespace]
         service
         pod1
         pod2
     end
 
-    subgraph provider[Provider-owned credit-services namespace]
+    subgraph mcpserver[credit-services namespace]
         mcp
     end
 ```
@@ -52,14 +52,14 @@ session. The supervisor receives:
 
 The API starts one root request span before MCP initialization. The application
 then opens a Strands `MCPClient`, initializes the Streamable HTTP transport,
-discovers the provider tools, validates the exact contract, creates the
+discovers the MCP server tools, validates the exact contract, creates the
 supervisor, and invokes it while the MCP client context and request span remain
 open. The response includes the active `trace_id` for correlation in Langfuse.
-MCP discovery occurs before the supervisor selects a route, so provider failure
+MCP discovery occurs before the supervisor selects a route, so MCP server failure
 affects every `/invoke` request, including prompts that would otherwise use
 only the Knowledge Base, calculator, or memory. The request fails safely if
-`CREDIT_SCORE_MCP_URL` is absent, malformed, the provider is unavailable, or
-the provider exposes anything other than exactly one tool named
+`CREDIT_SCORE_MCP_URL` is absent, malformed, the MCP server is unavailable, or
+the MCP server exposes anything other than exactly one tool named
 `get_credit_score`.
 
 The pinned MCP transport uses bounded HTTP defaults: 30 seconds for connect,
@@ -67,23 +67,27 @@ write, and pool operations and 300 seconds for stream reads. Strands startup is
 bounded to 30 seconds. The participant explorer uses a 30-second MCP request
 read timeout.
 
-## Ownership boundary
+## MCP server ownership boundary
 
-Lab 6 consumes but never deploys, modifies, or deletes the provider:
+Lab 6 uses but never deploys, modifies, restarts, scales, replaces, or deletes the credit-score MCP server:
 
 ```text
 credit-services/service/credit-score-mcp:8081
 ```
 
-Workshop Studio owns that namespace, Deployment, Service, endpoint, and any
-provider configuration. In another organization the provider could be maintained by a separate team and run in another account, network, or EKS cluster. The workshop simulates that lifecycle boundary with a separate namespace in the same cluster; it is not hard isolation.
+Workshop Studio deploys the `credit-services` namespace, Deployment, Service,
+endpoint, and configuration before participants begin. The credit-services team
+manages the MCP server, and participants only inspect and invoke it. In production,
+another organizational team could own and maintain the MCP server in another
+account, network, or EKS cluster. The workshop simulates that lifecycle boundary
+with a separate namespace in the same cluster; it is not hard isolation.
 
 Lab 6 owns the `mortgage-assistant` namespace and
-continues to replace the earlier checkpoint's consumer Deployment in place.
+continues to replace the earlier checkpoint's `mortgage-assistant` Deployment in place.
 The existing service account, API-key Secret, and NLB Service names are
 preserved.
 
-The cleanup script deletes only the consumer `mortgage-assistant` namespace.
+The cleanup script deletes only the `mortgage-assistant` application namespace.
 It does not touch `credit-services` or shared AWS infrastructure.
 
 ## Credit-score safety policy
@@ -155,14 +159,14 @@ The deployment uses these Workshop Studio Parameter Store paths:
 | Credit-score MCP URL | `/workshop/mortgage-assistant/mcp/credit-score-url` |
 
 The MCP URL is required in the application as `CREDIT_SCORE_MCP_URL` and is
-validated against the fixed provider identity:
+validated against the fixed credit-score MCP server identity:
 
 ```text
 http://credit-score-mcp.credit-services.svc.cluster.local:8081/mcp
 ```
 
 The explorer does not accept an arbitrary URL. It always uses a temporary
-loopback-only `kubectl port-forward` to the fixed provider Service and local
+loopback-only `kubectl port-forward` to the fixed credit-score MCP Service and local
 `/mcp` path.
 
 ## Prerequisites
@@ -173,7 +177,7 @@ loopback-only `kubectl port-forward` to the fixed provider Service and local
 - Docker Buildx or a Docker-compatible builder
 - completed Lab 5 observability deployment, including the namespaced
   `langfuse-otel-auth` Secret
-- active provider Deployment, Service, and endpoints in `credit-services`
+- active credit-score MCP Deployment, Service, and endpoints in `credit-services`
 
 Confirm identity and cluster access:
 
@@ -199,15 +203,15 @@ The first `uv run` command creates the lab-local environment, installs its
 locked dependencies, and runs the tests. The tests use mocks, local source
 inspection, and a real local loopback Streamable HTTP contract fixture that
 initializes MCP, discovers the tool, and calls it. They do not call AWS,
-Kubernetes, Bedrock, DynamoDB, the NLB, the provider in `credit-services`, or
-an external network.
+Kubernetes, Bedrock, DynamoDB, the NLB, the credit-score MCP server in
+`credit-services`, or an external network.
 
-## Explore the provider contract
+## Explore the credit-score MCP server contract
 
 Every explorer operation:
 
 1. finds a free loopback port;
-2. starts `kubectl port-forward` from the fixed provider Service port 8081;
+2. starts `kubectl port-forward` from the fixed credit-score MCP Service port 8081;
 3. waits until the tunnel accepts connections;
 4. creates a real MCP `ClientSession`;
 5. initializes the protocol and lists tools;
@@ -232,7 +236,7 @@ Inspect the expected tool schema:
 uv run scripts/explore_credit_score_mcp.py inspect-tool
 ```
 
-Call the provider with synthetic data:
+Call the MCP server with synthetic data:
 
 ```bash
 uv run scripts/explore_credit_score_mcp.py \
@@ -249,7 +253,7 @@ uv run scripts/explore_credit_score_mcp.py verify
 Output is structured, indented JSON. Failures are written to standard error
 and return a nonzero status.
 
-## Deploy the integrated consumer
+## Deploy the integrated `mortgage-assistant` application
 
 ```bash
 chmod +x \
@@ -276,12 +280,12 @@ The deployment script:
    Langfuse OTLP endpoint/UI, and MCP URL;
 2. verifies the memory table, vector index, and Lab 5 `langfuse-otel-auth`
    Secret are available;
-3. checks the existing provider Deployment, Service, and ready endpoint on
+3. checks the existing credit-score MCP Deployment, Service, and ready endpoint on
    port 8081;
 4. runs the fixed-target explorer `verify` operation before building;
 5. builds and pushes a Linux AMD64 image tagged
    `lab06-agent-<UTC timestamp>`;
-6. applies only consumer-owned Kubernetes resources;
+6. applies only `mortgage-assistant` Kubernetes resources;
 7. reapplies the API-key Secret, retaining its existing value unless explicitly overridden, and reads the existing Langfuse OTLP Secret without reapplying it;
 8. injects MCP, OTLP, content-masking, and fault-injection configuration into
    both application replicas;
@@ -289,7 +293,7 @@ The deployment script:
 10. sends an explicit synthetic credit-score smoke test and requires a
     returned `trace_id`.
 
-The script prints neither provider credentials nor the consumer API key.
+The script does not print the `mortgage-assistant` API key.
 
 ## Invoke the integrated agent
 
@@ -409,7 +413,7 @@ This checkpoint intentionally preserves the existing Lab 05 internet-facing,
 source-CIDR-restricted HTTP NLB. That workshop transport does not provide TLS.
 A production deployment must terminate TLS, use HTTPS clients, replace the
 shared bearer key with individual authentication, and enforce an egress policy
-for the provider destination.
+for the credit-score MCP server destination.
 
 ## Langfuse tracing exercise
 
@@ -432,12 +436,13 @@ model, and tool spans and compare their durations with a general mortgage
 request.
 
 The remote operation can appear as a named tool span, an HTTP client span, or
-nested work beneath the supervisor. Provider-side trace joining is not part of
-this checkpoint. The absence of a particular MCP-labeled span does not prove a
-contract failure; use the explorer `verify` operation, API response, provider
-logs, and trace error/latency evidence together. CloudWatch Container Insights
-and workload logs remain supplementary platform telemetry. Use only synthetic
-data because logs and traces can retain request-related values.
+nested work beneath the supervisor. Cross-service trace joining from the
+credit-score MCP server is not part of this checkpoint. The absence of a
+particular MCP-labeled span does not prove a contract failure; use the explorer
+`verify` operation, API response, MCP server logs, and trace error/latency
+evidence together. CloudWatch Container Insights and workload logs remain
+supplementary platform telemetry. Use only synthetic data because logs and
+traces can retain request-related values.
 
 ## Troubleshooting
 
@@ -455,10 +460,11 @@ kubectl get deployment mortgage-assistant \
 grep CREDIT_SCORE_MCP_URL
 ```
 
-### Provider verification fails
+### Credit-score MCP server verification fails
 
-The consumer deployment does not repair provider resources. Inspect them and
-use the Workshop Studio support path if they are missing or unhealthy:
+The `mortgage-assistant` deployment does not repair credit-score MCP server
+resources. Inspect them and use the Workshop Studio support path if they are
+missing or unhealthy:
 
 ```bash
 kubectl get deployment,service,endpoints,pods \
@@ -477,7 +483,7 @@ uv run scripts/explore_credit_score_mcp.py list-tools
 uv run scripts/explore_credit_score_mcp.py inspect-tool
 ```
 
-The provider contract must contain exactly one tool named
+The MCP server contract must contain exactly one tool named
 `get_credit_score`. Lab 6 rejects extra tools rather than broadening agent
 capabilities silently.
 
@@ -500,8 +506,8 @@ credit scores intentionally must not become long-term memories.
 ./scripts/cleanup-mcp-integration.sh --region us-west-2
 ```
 
-This removes the `mortgage-assistant` namespace and its consumer NLB,
-API-key Secret, and Langfuse OTLP Secret. It leaves the provider-owned
-`credit-services` namespace, Workshop Studio-managed Langfuse infrastructure,
-memory table, vector index, ECR repository, EKS cluster, Knowledge Base, IAM
-resources, and Parameter Store values unchanged.
+This removes the `mortgage-assistant` application namespace and its NLB,
+API-key Secret, and Langfuse OTLP Secret. It leaves the `credit-services`
+namespace managed for the credit-services team, Workshop Studio-managed
+Langfuse infrastructure, memory table, vector index, ECR repository, EKS
+cluster, Knowledge Base, IAM resources, and Parameter Store values unchanged.
