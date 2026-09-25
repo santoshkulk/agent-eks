@@ -625,7 +625,7 @@ Expected response:
 Invoke the local API using the Python client:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --url http://127.0.0.1:8080 \
   --api-key "$MORTGAGE_API_KEY" \
   --prompt "Compare 15-year and 30-year mortgages."
@@ -809,14 +809,14 @@ These endpoints do not require the API key.
 The client discovers the endpoint and API key automatically:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "When does refinancing make sense?"
 ```
 
 Print the complete API response:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "Compare 15-year and 30-year mortgages." \
   --json
 ```
@@ -837,7 +837,7 @@ logs.
 To bypass Kubernetes discovery, provide the endpoint and key:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --url "$MORTGAGE_API_URL" \
   --api-key "$MORTGAGE_API_KEY" \
   --prompt "What are the tradeoffs of a shorter mortgage term?"
@@ -906,13 +906,13 @@ kubectl get pods \
 Send several prompts:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "What is a fixed-rate mortgage?"
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "When might refinancing be useful?"
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "Calculate 250000 divided by 300."
 ```
 
@@ -975,7 +975,7 @@ kubectl rollout status \
 Invoke the service again:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "What are the benefits of making a larger deposit?"
 ```
 
@@ -1328,7 +1328,7 @@ kubectl logs \
 You can change the client timeout:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --timeout 600 \
   --prompt "Explain the tradeoffs between 15-year and 30-year mortgages."
 ```

@@ -348,7 +348,7 @@ cd 05-observability
 
 uv sync --frozen
 
-uv run python -m unittest discover \
+uv run --frozen python -m unittest discover \
   --start-directory tests \
   --verbose
 ```
@@ -457,7 +457,7 @@ aws secretsmanager get-secret-value \
     --name /workshop/mortgage-assistant/langfuse/secret-arn \
     --query 'Parameter.Value' --output text)" \
   --query SecretString --output text |
-python3 -c 'import json,sys; c=json.load(sys.stdin); print("Email:", c["init_user_email"]); print("Password:", c["init_user_password"])'
+uv run --frozen python -c 'import json,sys; c=json.load(sys.stdin); print("Email:", c["init_user_email"]); print("Password:", c["init_user_password"])'
 ```
 
 The Langfuse instance itself still has no direct public inbound access —
@@ -467,7 +467,7 @@ where you will read each trace for the remaining exercises.
 ## Step 6 — Exercise 1: A general mortgage question
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --prompt "What are the benefits of a 15-year mortgage?"
 ```
@@ -485,7 +485,7 @@ Langfuse UI, open **Tracing**, find that trace ID, and inspect:
 ## Step 7 — Exercise 2: An existing-account question
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What is the outstanding principal on account 555000111?"
@@ -503,13 +503,13 @@ Display your current actor and session, then send two related prompts in
 the same session:
 
 ```bash
-python3 app/invoke_eks.py --region us-west-2 --show-context
+uv run --frozen python app/invoke_eks.py --region us-west-2 --show-context
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --prompt "I am considering a property worth 600,000 dollars."
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --prompt "What property value did I mention in this conversation?"
 ```
@@ -551,7 +551,7 @@ kubectl set env deployment/mortgage-assistant \
 kubectl rollout status deployment/mortgage-assistant \
   --namespace mortgage-assistant
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What is the outstanding principal on account 555000111?"
@@ -569,7 +569,7 @@ kubectl set env deployment/mortgage-assistant \
 kubectl rollout status deployment/mortgage-assistant \
   --namespace mortgage-assistant
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What is the outstanding principal on account 555000111?"
@@ -596,12 +596,12 @@ redeploying at any point returns to this disabled state.
 Send the same prompt twice, in two separate sessions:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What are the benefits of a 15-year mortgage?"
 
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What are the benefits of a 15-year mortgage?"

@@ -262,6 +262,6 @@ Lab 04 completed.
 
 Start the memory exercises:
   cd 04-memory
-  python3 app/invoke_eks.py --region $REGION --prompt \\
+  uv run --frozen python app/invoke_eks.py --region $REGION --prompt \\
     "Remember that I prefer a 15-year fixed-rate mortgage."
 EOF

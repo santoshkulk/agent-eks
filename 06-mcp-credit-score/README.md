@@ -302,7 +302,7 @@ and keeps the current session in:
 Request a synthetic credit score:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```
@@ -310,8 +310,8 @@ python3 app/invoke_eks.py \
 Display or replace the current session:
 
 ```bash
-python3 app/invoke_eks.py --region us-west-2 --show-context
-python3 app/invoke_eks.py --region us-west-2 --new-session \
+uv run --frozen python app/invoke_eks.py --region us-west-2 --show-context
+uv run --frozen python app/invoke_eks.py --region us-west-2 --new-session \
   --prompt "What mortgage preferences do you remember?"
 ```
 
@@ -331,9 +331,9 @@ Base ID and reports model/memory configuration.
 Test same-session state:
 
 ```bash
-python3 app/invoke_eks.py --prompt \
+uv run --frozen python app/invoke_eks.py --prompt \
   "I am considering a property worth 600,000 dollars."
-python3 app/invoke_eks.py --prompt \
+uv run --frozen python app/invoke_eks.py --prompt \
   "What property value did I mention in this conversation?"
 ```
 
@@ -344,7 +344,7 @@ kubectl rollout restart deployment/mortgage-assistant \
   --namespace mortgage-assistant
 kubectl rollout status deployment/mortgage-assistant \
   --namespace mortgage-assistant
-python3 app/invoke_eks.py --prompt \
+uv run --frozen python app/invoke_eks.py --prompt \
   "What property value did I tell you earlier?"
 ```
 
@@ -365,16 +365,16 @@ wait up to 60 seconds for search visibility.
 Test durable recall across sessions:
 
 ```bash
-python3 app/invoke_eks.py --prompt \
+uv run --frozen python app/invoke_eks.py --prompt \
   "Remember for future conversations that I prefer a 15-year fixed-rate mortgage."
-python3 app/invoke_eks.py --new-session --prompt \
+uv run --frozen python app/invoke_eks.py --new-session --prompt \
   "What mortgage term do I prefer?"
 ```
 
 Test actor isolation:
 
 ```bash
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --actor-id alternate-user \
   --new-session \
   --prompt "What mortgage preferences do you remember about me?"

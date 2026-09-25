@@ -388,6 +388,6 @@ and were not printed.
 
 Invoke the integrated agent:
   cd 06-mcp-credit-score
-  python3 app/invoke_eks.py --region $REGION --prompt \\
+  uv run --frozen python app/invoke_eks.py --region $REGION --prompt \\
     "Get the credit score for synthetic customer ID workshop-customer-12345."
 EOF

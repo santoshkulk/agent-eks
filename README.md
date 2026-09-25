@@ -93,7 +93,7 @@ uv run mortgage_agent.py \
 ```bash
 cd ../03-eks-service
 ./scripts/deploy-application.sh --region us-west-2
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --prompt "When does refinancing make sense?"
 ```
 
@@ -104,9 +104,9 @@ The script discovers provisioned resources, builds and pushes a `linux/amd64` im
 ```bash
 cd ../04-memory
 uv sync --frozen
-uv run python -m unittest discover --start-directory tests --verbose
+uv run --frozen python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-memory.sh --region us-west-2
-python3 app/invoke_eks.py --region us-west-2 --show-context
+uv run --frozen python app/invoke_eks.py --region us-west-2 --show-context
 ```
 
 See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, and cleanup exercises.
@@ -148,7 +148,7 @@ Deploy only the updated consumer and invoke it:
 
 ```bash
 ./scripts/deploy-mcp-integration.sh --region us-west-2
-python3 app/invoke_eks.py \
+uv run --frozen python app/invoke_eks.py \
   --region us-west-2 \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```
