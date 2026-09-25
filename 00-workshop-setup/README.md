@@ -28,8 +28,8 @@ It does not deploy the mortgage application.
 
 This standalone setup does not provision the self-hosted Langfuse stack used
 by Lab 5. Lab 6 uses a pre-provisioned credit-score MCP server managed by the
-credit-services team. This setup does not build or deploy its
-`credit-services/credit-score-mcp` workload or publish
+credit-services team. This setup does not build or deploy the
+`credit-score-mcp` workload in the `credit-services` namespace or publish
 `/workshop/mortgage-assistant/mcp/credit-score-url`. Labs 5 and 6 require a
 Workshop Studio-provisioned environment. Do not substitute an arbitrary MCP
 endpoint or modify that MCP server to work around this limitation.

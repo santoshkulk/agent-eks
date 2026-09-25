@@ -168,7 +168,7 @@ PROVIDER_PORT="$(kubectl get endpoints credit-score-mcp \
   --namespace credit-services \
   --output jsonpath='{.subsets[0].ports[?(@.port==8081)].port}')"
 if [[ -z "$PROVIDER_ENDPOINT" || "$PROVIDER_PORT" != "8081" ]]; then
-  echo "credit-services/credit-score-mcp has no ready endpoint on port 8081." >&2
+  echo "The credit-score-mcp Service in namespace credit-services has no ready endpoint on port 8081." >&2
   exit 1
 fi
 uv run --project "$MODULE_DIR" --frozen python \
@@ -378,7 +378,7 @@ Lab 06 completed.
   Vector index: $MEMORY_VECTOR_INDEX_NAME
   Image: $IMAGE_URI
   Mortgage-assistant API endpoint: http://${SERVICE_ENDPOINT}
-  Credit-score MCP server: credit-services/credit-score-mcp:8081
+  Credit-score MCP Service: credit-score-mcp in namespace credit-services, port 8081
   Langfuse UI: $LANGFUSE_URL
   Smoke-test trace ID: $SMOKE_TRACE_ID
 
