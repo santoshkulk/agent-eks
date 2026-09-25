@@ -234,5 +234,5 @@ Lab 03 completed.
 
 Send another prompt without rebuilding:
   cd 03-eks-service
-  uv run --frozen python app/invoke_eks.py --prompt "When does refinancing make sense?"
+  uv run app/invoke_eks.py --prompt "When does refinancing make sense?"
 EOF

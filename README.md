@@ -64,7 +64,9 @@ aws sts get-caller-identity
 aws configure get region
 ```
 
-Use only synthetic workshop data.
+Use only synthetic workshop data. Run Python commands through `uv run`; the
+first invocation in each lab creates its local environment and installs the
+locked dependencies automatically.
 
 ## Lab 1: Explore the Provisioned Environment
 
@@ -72,7 +74,6 @@ Query the Knowledge Base directly:
 
 ```bash
 cd 01-test-knowledge-base
-uv sync --frozen
 uv run query_knowledge_base.py \
   --query "What are the benefits of a 15-year mortgage?"
 ```
@@ -83,7 +84,6 @@ The Workshop Studio Lab 1 pages also inspect EKS and use the fixed-target Lab 6 
 
 ```bash
 cd ../02-local-strands
-uv sync --frozen
 uv run mortgage_agent.py \
   --prompt "Compare 15-year and 30-year mortgages"
 ```
@@ -93,7 +93,7 @@ uv run mortgage_agent.py \
 ```bash
 cd ../03-eks-service
 ./scripts/deploy-application.sh --region us-west-2
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --prompt "When does refinancing make sense?"
 ```
 
@@ -103,10 +103,9 @@ The script discovers provisioned resources, builds and pushes a `linux/amd64` im
 
 ```bash
 cd ../04-memory
-uv sync --frozen
-uv run --frozen python -m unittest discover --start-directory tests --verbose
+uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-memory.sh --region us-west-2
-uv run --frozen python app/invoke_eks.py --region us-west-2 --show-context
+uv run app/invoke_eks.py --region us-west-2 --show-context
 ```
 
 See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, and cleanup exercises.
@@ -115,8 +114,7 @@ See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacemen
 
 ```bash
 cd ../05-observability
-uv sync --frozen
-uv run --frozen python -m unittest discover --start-directory tests --verbose
+uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-observability.sh --region us-west-2
 ```
 
@@ -126,8 +124,7 @@ See [`05-observability/README.md`](05-observability/README.md) for trace correla
 
 ```bash
 cd ../06-mcp-credit-score
-uv sync --frozen
-uv run --frozen python -m unittest discover \
+uv run python -m unittest discover \
   --start-directory tests \
   --verbose
 ```
@@ -135,20 +132,20 @@ uv run --frozen python -m unittest discover \
 Explore the pre-provisioned fixed provider:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py info
-uv run --frozen python scripts/explore_credit_score_mcp.py list-tools
-uv run --frozen python scripts/explore_credit_score_mcp.py inspect-tool
-uv run --frozen python scripts/explore_credit_score_mcp.py \
+uv run scripts/explore_credit_score_mcp.py info
+uv run scripts/explore_credit_score_mcp.py list-tools
+uv run scripts/explore_credit_score_mcp.py inspect-tool
+uv run scripts/explore_credit_score_mcp.py \
   call-credit-score \
   --customer-id workshop-customer-12345
-uv run --frozen python scripts/explore_credit_score_mcp.py verify
+uv run scripts/explore_credit_score_mcp.py verify
 ```
 
 Deploy only the updated consumer and invoke it:
 
 ```bash
 ./scripts/deploy-mcp-integration.sh --region us-west-2
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```

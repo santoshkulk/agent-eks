@@ -295,7 +295,7 @@ conversation while retaining the same actor.
 Display the current values:
 
 ```bash
-uv run --frozen python app/invoke_eks.py --show-context
+uv run app/invoke_eks.py --show-context
 ```
 
 The `.workshop` directory is excluded from source control.
@@ -503,22 +503,22 @@ Workshop Studio provisions the runtime IAM policy, DynamoDB table, and vector
 index before the lab begins. `hydrate_memory.py` is participant-facing
 test-data tooling; it does not create infrastructure.
 
-## Step 2: Install and test the module locally
+## Step 2: Test the module locally
 
 From the repository root:
 
 ```bash
 cd 04-memory
 
-uv sync --frozen
-
-uv run --frozen python -m unittest discover \
+uv run python -m unittest discover \
   --start-directory tests \
   --verbose
 ```
 
-These tests validate the API contract, identifier rules, TTL separation, and
-client session-state behaviour. They do not invoke Bedrock or modify AWS.
+The first `uv run` command creates the lab-local environment, installs its
+locked dependencies, and runs the tests. These tests validate the API contract,
+identifier rules, TTL separation, and client session-state behaviour. They do
+not invoke Bedrock or modify AWS.
 
 ## Step 3: Deploy the memory-enabled application
 
@@ -580,7 +580,7 @@ grep MEMORY
 ## Step 5: Display your actor and session
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --show-context
 ```
@@ -599,7 +599,7 @@ Keep this session for the short-term memory tests.
 Tell the assistant a fact that should remain within the active conversation:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "I am considering a property worth 600,000 dollars."
 ```
@@ -607,7 +607,7 @@ uv run --frozen python app/invoke_eks.py \
 Ask a follow-up without supplying IDs:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "What property value did I mention in this conversation?"
 ```
@@ -636,7 +636,7 @@ kubectl rollout status deployment/mortgage-assistant \
 Ask again using the existing client session:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "What property value did I tell you earlier?"
 ```
@@ -697,7 +697,7 @@ uv run scripts/hydrate_memory.py clear \
 Explicitly ask the assistant to remember a durable preference:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "Remember for future conversations that I prefer a 15-year fixed-rate mortgage and prioritize paying the loan off early."
 ```
@@ -728,7 +728,7 @@ conversations`.
 Create a new conversation for the same actor:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What kind of mortgage do I prefer?"
@@ -749,7 +749,7 @@ long-term memory.
 Use different wording from the stored memory:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "Do you remember how quickly I wanted to repay my home loan?"
@@ -778,7 +778,7 @@ retries for up to 60 seconds by default.
 Select another actor and start a new session:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --actor-id alternate-user \
   --new-session \
@@ -795,7 +795,7 @@ preference.
 Return to the default actor by omitting `--actor-id`:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --new-session \
   --prompt "What mortgage term do I prefer?"
@@ -891,7 +891,7 @@ The index is ready when `IndexStatus` is `ACTIVE` and `Backfilling` is false.
 Display the client context:
 
 ```bash
-uv run --frozen python app/invoke_eks.py --show-context
+uv run app/invoke_eks.py --show-context
 ```
 
 Confirm both prompts used the same actor and session. Supplying

@@ -354,6 +354,6 @@ still has no direct public inbound access.
 
 Start the observability exercises:
   cd 05-observability
-  uv run --frozen python app/invoke_eks.py --region $REGION --prompt \\
+  uv run app/invoke_eks.py --region $REGION --prompt \\
     "What are the benefits of a 15-year mortgage?"
 EOF

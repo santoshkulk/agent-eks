@@ -200,6 +200,5 @@ Lab 00 completed.
 
 Continue with Lab 01:
   cd 01-test-knowledge-base
-  uv sync --frozen
   uv run query_knowledge_base.py --query "What are the benefits of a 15-year mortgage?"
 EOF

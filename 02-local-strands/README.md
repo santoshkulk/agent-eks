@@ -1,11 +1,11 @@
 # Lab 02: Run the Strands mortgage assistant locally
 
 This lab introduces the multi-agent mortgage assistant. It uses your laptop's
-AWS credentials and the Knowledge Base deployed in Lab 00.
+AWS credentials and the Knowledge Base deployed in Lab 00. The first `uv run`
+command creates the local environment and installs its locked dependencies
+automatically.
 
 ```bash
-uv sync --frozen
-
 uv run mortgage_agent.py \
   --prompt "What are the benefits of a 15-year mortgage?"
 ```

@@ -183,12 +183,11 @@ kubectl get nodes
 kubectl get deployment,service,endpoints --namespace credit-services
 ```
 
-## Install and validate locally
+## Validate locally
 
 ```bash
 cd 06-mcp-credit-score
-uv sync --frozen
-uv run --frozen python -m unittest discover \
+uv run python -m unittest discover \
   --start-directory tests \
   --verbose
 
@@ -196,10 +195,12 @@ bash -n scripts/deploy-mcp-integration.sh
 bash -n scripts/cleanup-mcp-integration.sh
 ```
 
-The tests use mocks, local source inspection, and a real local loopback
-Streamable HTTP contract fixture that initializes MCP, discovers the tool, and
-calls it. They do not call AWS, Kubernetes, Bedrock, DynamoDB, the NLB, the
-provider in `credit-services`, or an external network.
+The first `uv run` command creates the lab-local environment, installs its
+locked dependencies, and runs the tests. The tests use mocks, local source
+inspection, and a real local loopback Streamable HTTP contract fixture that
+initializes MCP, discovers the tool, and calls it. They do not call AWS,
+Kubernetes, Bedrock, DynamoDB, the NLB, the provider in `credit-services`, or
+an external network.
 
 ## Explore the provider contract
 
@@ -216,25 +217,25 @@ Every explorer operation:
 Show server initialization details:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py info
+uv run scripts/explore_credit_score_mcp.py info
 ```
 
 List tools:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py list-tools
+uv run scripts/explore_credit_score_mcp.py list-tools
 ```
 
 Inspect the expected tool schema:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py inspect-tool
+uv run scripts/explore_credit_score_mcp.py inspect-tool
 ```
 
 Call the provider with synthetic data:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py \
+uv run scripts/explore_credit_score_mcp.py \
   call-credit-score \
   --customer-id workshop-customer-12345
 ```
@@ -242,7 +243,7 @@ uv run --frozen python scripts/explore_credit_score_mcp.py \
 Run the deployment preflight contract check:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py verify
+uv run scripts/explore_credit_score_mcp.py verify
 ```
 
 Output is structured, indented JSON. Failures are written to standard error
@@ -302,7 +303,7 @@ and keeps the current session in:
 Request a synthetic credit score:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --region us-west-2 \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```
@@ -310,8 +311,8 @@ uv run --frozen python app/invoke_eks.py \
 Display or replace the current session:
 
 ```bash
-uv run --frozen python app/invoke_eks.py --region us-west-2 --show-context
-uv run --frozen python app/invoke_eks.py --region us-west-2 --new-session \
+uv run app/invoke_eks.py --region us-west-2 --show-context
+uv run app/invoke_eks.py --region us-west-2 --new-session \
   --prompt "What mortgage preferences do you remember?"
 ```
 
@@ -331,9 +332,9 @@ Base ID and reports model/memory configuration.
 Test same-session state:
 
 ```bash
-uv run --frozen python app/invoke_eks.py --prompt \
+uv run app/invoke_eks.py --prompt \
   "I am considering a property worth 600,000 dollars."
-uv run --frozen python app/invoke_eks.py --prompt \
+uv run app/invoke_eks.py --prompt \
   "What property value did I mention in this conversation?"
 ```
 
@@ -344,18 +345,18 @@ kubectl rollout restart deployment/mortgage-assistant \
   --namespace mortgage-assistant
 kubectl rollout status deployment/mortgage-assistant \
   --namespace mortgage-assistant
-uv run --frozen python app/invoke_eks.py --prompt \
+uv run app/invoke_eks.py --prompt \
   "What property value did I tell you earlier?"
 ```
 
 Seed, inspect, search, and clear deterministic long-term memories:
 
 ```bash
-uv run --frozen scripts/hydrate_memory.py seed --replace
-uv run --frozen app/inspect_memory.py --memories
-uv run --frozen app/inspect_memory.py --search "preferred repayment period"
-uv run --frozen scripts/hydrate_memory.py clear
-uv run --frozen scripts/hydrate_memory.py clear --all-data
+uv run scripts/hydrate_memory.py seed --replace
+uv run app/inspect_memory.py --memories
+uv run app/inspect_memory.py --search "preferred repayment period"
+uv run scripts/hydrate_memory.py clear
+uv run scripts/hydrate_memory.py clear --all-data
 ```
 
 `clear --all-data` removes both sessions and long-term memories for the selected
@@ -365,16 +366,16 @@ wait up to 60 seconds for search visibility.
 Test durable recall across sessions:
 
 ```bash
-uv run --frozen python app/invoke_eks.py --prompt \
+uv run app/invoke_eks.py --prompt \
   "Remember for future conversations that I prefer a 15-year fixed-rate mortgage."
-uv run --frozen python app/invoke_eks.py --new-session --prompt \
+uv run app/invoke_eks.py --new-session --prompt \
   "What mortgage term do I prefer?"
 ```
 
 Test actor isolation:
 
 ```bash
-uv run --frozen python app/invoke_eks.py \
+uv run app/invoke_eks.py \
   --actor-id alternate-user \
   --new-session \
   --prompt "What mortgage preferences do you remember about me?"
@@ -472,8 +473,8 @@ kubectl logs deployment/credit-score-mcp \
 Run:
 
 ```bash
-uv run --frozen python scripts/explore_credit_score_mcp.py list-tools
-uv run --frozen python scripts/explore_credit_score_mcp.py inspect-tool
+uv run scripts/explore_credit_score_mcp.py list-tools
+uv run scripts/explore_credit_score_mcp.py inspect-tool
 ```
 
 The provider contract must contain exactly one tool named
