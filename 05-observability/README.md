@@ -1,14 +1,17 @@
-# Lab 05: Add observability with OpenTelemetry and a self-hosted Langfuse instance
+# Lab 05: Add observability with OpenTelemetry and self-hosted Langfuse
 
 In this lab, you instrument the memory-enabled mortgage assistant from Lab
 04 with OpenTelemetry tracing and export those traces to a self-hosted
-Langfuse instance. You will inspect agent execution, specialist delegation,
+Langfuse deployment. You will inspect agent execution, specialist delegation,
 tool calls, model calls, latency, and token usage for individual requests
 and across a full conversation.
 
-Langfuse runs on a single, workshop-managed EC2 instance in a private
-subnet with no direct public inbound access; you reach its UI through a
-CloudFront distribution that connects to it over a private VPC origin. This
+Langfuse runs on the same Amazon EKS cluster as the mortgage assistant,
+with Amazon Aurora PostgreSQL, Amazon ElastiCache for Valkey, and Amazon S3
+as managed backing services and ClickHouse running in the cluster. The
+agents send traces to it over the cluster's internal network. It has no
+direct public inbound access; you reach its UI through a CloudFront
+distribution that connects to it over a private VPC origin. This
 lab does not use Amazon Bedrock AgentCore or AWS X-Ray/CloudWatch
 Application Signals.
 
@@ -40,8 +43,9 @@ observability exercises.
 
 Lab 05 keeps the same long-running FastAPI service, EKS routing model, and
 DynamoDB-backed memory from Lab 04. It adds an OpenTelemetry exporter to
-every newly created supervisor agent, and a single self-hosted Langfuse
-instance that receives OTLP/HTTP trace data over a private VPC connection.
+every newly created supervisor agent, and a self-hosted Langfuse
+deployment on the same cluster that receives OTLP/HTTP trace data through
+its in-cluster Kubernetes Service.
 
 ```mermaid
 flowchart TB
@@ -85,28 +89,26 @@ flowchart TB
         end
 
         podIdentity["EKS Pod Identity association<br/>temporary IAM credentials"]
-        ssm["AWS Systems Manager Parameter Store<br/>Langfuse endpoint, secret ARN, instance ID, UI URL"]
+        ssm["AWS Systems Manager Parameter Store<br/>Langfuse endpoint, secret ARN, UI URL"]
         model["Amazon Bedrock model"]
         knowledgeBase["Amazon Bedrock Knowledge Base"]
         dynamodb["DynamoDB memory table<br/>(Lab 04)"]
 
-        langfuseEc2["Self-hosted Langfuse EC2 instance<br/>no direct public inbound access"]
         langfuseSecret["Secrets Manager secret<br/>Langfuse credentials"]
         langfuseNlb["Internal Network Load Balancer"]
         langfuseCloudFront["CloudFront distribution<br/>VPC origin"]
 
-        subgraph langfuse["Docker Compose stack on the Langfuse instance"]
+        subgraph langfuse["Langfuse on the EKS cluster (namespace: langfuse)"]
             langfuseWeb["langfuse-web + langfuse-worker"]
-            postgres["Postgres"]
-            clickhouse["ClickHouse"]
-            redis["Redis"]
-            minio["MinIO"]
-            langfuseWeb --> postgres
+            clickhouse["ClickHouse<br/>(in-cluster)"]
             langfuseWeb --> clickhouse
-            langfuseWeb --> redis
-            langfuseWeb --> minio
         end
-        langfuseEc2 --> langfuse
+        aurora["Amazon Aurora PostgreSQL<br/>Serverless v2"]
+        valkey["Amazon ElastiCache Serverless<br/>(Valkey)"]
+        langfuseS3["Amazon S3 bucket<br/>events and media"]
+        langfuseWeb --> aurora
+        langfuseWeb --> valkey
+        langfuseWeb --> langfuseS3
     end
 
     client -->|"prompt + actor_id + session_id"| nlb
@@ -123,19 +125,20 @@ flowchart TB
     agent2 --> model
     agent1 --> knowledgeBase
     agent2 --> knowledgeBase
-    telemetry1 -->|"OTLP/HTTP, private VPC connectivity"| langfuseEc2
-    telemetry2 -->|"OTLP/HTTP, private VPC connectivity"| langfuseEc2
-    langfuseEc2 -.->|reads/writes credentials| langfuseSecret
+    telemetry1 -->|"OTLP/HTTP, in-cluster Service DNS"| langfuseWeb
+    telemetry2 -->|"OTLP/HTTP, in-cluster Service DNS"| langfuseWeb
+    langfuseSecret -.->|bootstrap user and API keys| langfuseWeb
     client -->|"HTTPS<br/>(UI access)"| langfuseCloudFront
     langfuseCloudFront -->|VPC origin, HTTP| langfuseNlb
-    langfuseNlb --> langfuseEc2
+    langfuseNlb --> langfuseWeb
 ```
 
 The existing Bedrock Knowledge Base, DynamoDB memory table, and mortgage
 tools remain unchanged. Lab 05 updates the same `mortgage-assistant`
 Deployment and continues to use the same Network Load Balancer. Workshop
-Studio pre-provisions the EKS cluster, DynamoDB table, Langfuse EC2
-instance, and other shared workshop infrastructure before the lab begins.
+Studio pre-provisions the EKS cluster, DynamoDB table, the Langfuse
+deployment and its backing services, and other shared workshop
+infrastructure before the lab begins.
 Lab 05 discovers those resources through canonical Systems Manager
 Parameter Store paths and reads Langfuse's generated API keys from Secrets
 Manager at deploy time.
@@ -293,7 +296,6 @@ paths, in addition to the Lab 04 memory parameters:
 | Bedrock Knowledge Base ID | `/workshop/mortgage-assistant/bedrock/knowledge-base-id` |
 | Langfuse OTLP ingestion endpoint | `/workshop/mortgage-assistant/langfuse/otlp-endpoint` |
 | Langfuse credentials secret ARN | `/workshop/mortgage-assistant/langfuse/secret-arn` |
-| Langfuse EC2 instance ID | `/workshop/mortgage-assistant/langfuse/instance-id` |
 | Langfuse public UI URL | `/workshop/mortgage-assistant/langfuse/url` |
 
 The deployment and cleanup scripts read these parameters directly and do
@@ -303,14 +305,15 @@ keeps these model defaults in code:
 - Agent model: `us.anthropic.claude-sonnet-4-6`.
 - Embedding model: `amazon.titan-embed-text-v2:0`.
 
-Workshop Studio also provisions the Langfuse EC2 instance itself: a single
-instance (default `t3.xlarge`, 4 vCPU / 16 GiB) running Postgres,
-ClickHouse, Redis, MinIO, and the Langfuse web/worker containers via Docker
-Compose, with an encrypted root EBS volume (default 100 GiB) for durable
-storage across reboots. The instance itself has no direct public inbound
-access. A CloudFront distribution reaches it through a VPC origin
+Workshop Studio also provisions Langfuse itself, installed on the shared
+EKS cluster with Helm. Its backing services are Amazon Aurora Serverless v2
+(PostgreSQL) for metadata, Amazon ElastiCache Serverless (Valkey) for the
+queue and cache, and an Amazon S3 bucket for raw events; ClickHouse runs in
+the cluster on a `gp3` EBS volume. The Langfuse pods have no direct public
+inbound access. A CloudFront distribution reaches them through a VPC origin
 targeting an internal Network Load Balancer, giving you a public HTTPS URL
-for the UI in Step 5 below.
+for the UI in Step 5 below. Your agent pods do not use that path: they send
+traces straight to the `langfuse-web` Service inside the cluster.
 
 ## Step 1: Review the Lab 05 files
 
@@ -412,7 +415,8 @@ Run `./scripts/deploy-observability.sh --help` for the complete list.
 
 The script does not create or update shared AWS infrastructure. Workshop
 Studio manages the EKS cluster, Knowledge Base, ECR repository, IAM
-resources, DynamoDB table, vector index, and the Langfuse EC2 instance.
+resources, DynamoDB table, vector index, and Langfuse with its backing
+services.
 
 ## Step 4: Check the deployment
 
@@ -459,8 +463,8 @@ aws secretsmanager get-secret-value \
 uv run python -c 'import json,sys; c=json.load(sys.stdin); print("Email:", c["init_user_email"]); print("Password:", c["init_user_password"])'
 ```
 
-The Langfuse instance itself still has no direct public inbound access —
-CloudFront reaches it over a private VPC origin. Langfuse's Tracing view is
+Langfuse still has no direct public inbound access — CloudFront reaches it
+over a private VPC origin. Langfuse's Tracing view is
 where you will read each trace for the remaining exercises.
 
 ## Step 6 — Exercise 1: A general mortgage question
@@ -687,7 +691,7 @@ base64 --decode
 
 ### Traces do not appear in the Langfuse UI
 
-Confirm the Langfuse instance is reachable from an EKS pod and that the
+Confirm the Langfuse web Service is reachable from an EKS pod and that the
 credentials in the OTLP header are still valid for the current Langfuse
 project:
 
@@ -703,11 +707,13 @@ kubectl run otlp-check --rm -it --restart=Never \
 
 Any HTTP response here (even an error status, since the OTLP exporter sends
 `POST` requests and this check sends a `GET`) confirms the pod can reach the
-Langfuse instance over the network; the problem is then further up the
-stack, for example an incorrect or missing `OTEL_EXPORTER_OTLP_HEADERS`
-value. A connection timeout or "connection refused" instead points to the
-`LangfuseSecurityGroup` or VPC routing; consult the Workshop Studio support
-path if it is not permitting traffic from the EKS node/pod security groups.
+`langfuse-web` Service; the problem is then further up the stack, for
+example an incorrect or missing `OTEL_EXPORTER_OTLP_HEADERS` value. A
+connection timeout or "connection refused" instead points to the Langfuse
+pods themselves. Ask your facilitator to check that the `langfuse-web`
+Deployment in the `langfuse` namespace is ready (`kubectl get pods
+--namespace langfuse`); the Service has no endpoints when its pods are not
+ready.
 
 ### The Langfuse UI will not load at the CloudFront URL
 
@@ -797,7 +803,7 @@ still apply unchanged; this table adds the observability-specific gaps.
 
 | Workshop implementation | Production concern | Recommended solution |
 |---|---|---|
-| One self-hosted Langfuse EC2 instance | No high availability, automated backup/restore testing, or horizontal scaling for the tracing backend itself. | Use Langfuse Cloud, a managed deployment behind a load balancer with multiple replicas, or an alternative managed OTLP-compatible backend; define RTO/RPO for the tracing data store. |
+| One self-hosted Langfuse deployment on the shared EKS cluster, with single-replica in-cluster ClickHouse | No high availability for ClickHouse, no automated backup/restore testing, and tracing shares cluster capacity with the workload it observes. | Use Langfuse Cloud, a managed deployment behind a load balancer with multiple replicas, or an alternative managed OTLP-compatible backend; define RTO/RPO for the tracing data store. |
 | `TELEMETRY_MASK_CONTENT` is opt-in and off by default | A misconfigured deployment could export real customer prompts/responses to Langfuse. | Make masking mandatory by policy for any deployment handling non-synthetic data, and add a startup check that refuses to start if masking is off outside an explicitly marked non-production environment. |
 | No trace sampling | Every request is fully traced, which is fine at workshop scale but does not represent production request volume or exporter cost. | Add head- or tail-based sampling appropriate to traffic volume and cost constraints once request volume is known. |
 | No alerting on the traces themselves | An operator must manually browse Langfuse to notice elevated latency, error rates, or cost. | Export key metrics (latency, error rate, token usage) to CloudWatch or Langfuse's own alerting, and page on SLO breaches. |
@@ -821,8 +827,8 @@ To remove only Lab 05 resources:
 This removes only the EKS application namespace (which also removes the
 `langfuse-otel-auth` Secret, since it lives in the same namespace) and its
 load balancer. Workshop Studio continues to manage the shared DynamoDB
-memory table, vector index, self-hosted Langfuse EC2 instance, IAM
-resources, EKS cluster, ECR repository, and Knowledge Base.
+memory table, vector index, the self-hosted Langfuse deployment and its
+backing services, IAM resources, EKS cluster, ECR repository, and Knowledge Base.
 
 To run Lab 04 again afterward:
 

@@ -17,7 +17,7 @@ Options:
 This removes the Lab 05 Kubernetes application only (including the
 langfuse-otel-auth Secret, which lives in the same namespace). Shared
 infrastructure, including the DynamoDB memory table and the self-hosted
-Langfuse EC2 instance, remains managed by Workshop Studio.
+Langfuse deployment, remains managed by Workshop Studio.
 EOF
 }
 
@@ -59,4 +59,4 @@ kubectl delete namespace mortgage-assistant \
 
 echo "Lab 05 application removed."
 echo "Shared DynamoDB memory infrastructure and the self-hosted Langfuse"
-echo "instance remain managed by Workshop Studio."
+echo "deployment remain managed by Workshop Studio."

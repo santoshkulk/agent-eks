@@ -22,7 +22,6 @@ KB_PARAMETER_NAME="/workshop/mortgage-assistant/bedrock/knowledge-base-id"
 LANGFUSE_OTLP_ENDPOINT_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/otlp-endpoint"
 LANGFUSE_SECRET_ARN_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/secret-arn"
 LANGFUSE_URL_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/url"
-LANGFUSE_INSTANCE_ID_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/instance-id"
 
 usage() {
   cat <<'EOF'
@@ -348,9 +347,9 @@ cat <<EOF
 To open the Langfuse UI, browse to:
   $LANGFUSE_URL
 and sign in with the bootstrapped workshop user (see the Langfuse
-credentials secret for the email/password). CloudFront reaches the
-Langfuse instance through a private VPC origin, so the instance itself
-still has no direct public inbound access.
+credentials secret for the email/password). CloudFront reaches
+Langfuse through a private VPC origin, so the Langfuse pods themselves
+still have no direct public inbound access.
 
 Start the observability exercises:
   cd 05-observability
