@@ -15,6 +15,7 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB. |
 | 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
 | 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
+| 7 | `07-audit-resume` | Turn the specialists into persistent agents-as-tools, then add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
 
@@ -41,6 +42,13 @@ Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MC
 - A synthetic score of `80` that is explicitly not a lending decision.
 
 Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. MCP server failure therefore affects all invocation routes. For MCP, `GET /health/ready` checks the fixed configured URL identity without connecting to the server; it also resolves the Knowledge Base ID. The explorer `verify` operation performs the live protocol and tool-contract check.
+
+Lab 7 is a complete checkpoint of Lab 6 that refactors the multi-agent design around Strands agents-as-tools. Each specialist becomes an `Agent` exposed with `Agent.as_tool(preserve_context=True)` with its own durable session, and the application adds:
+
+- A durable audit trail of invocations, model decisions, tool calls, memory reads and writes, and approvals for every agent, stored in the existing DynamoDB table with a hash chain.
+- Structured specialist reports, routing rationale, and an `explanation` block on each response.
+- Message-level snapshots, a per-session lease, request-level idempotency, a tool ledger, and rollback of unfinished turns so a failed request resumes with the same `request_id`.
+- Strands interrupts that pause side-effecting tool calls for human approval and survive pod restarts.
 
 ## MCP Server Ownership
 
@@ -154,6 +162,18 @@ The deployment preserves the existing `mortgage-assistant` NLB, Service, service
 
 See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and `mortgage-assistant`-only cleanup exercises.
 
+## Lab 7: Audit, Explain, and Resume Agent Executions
+
+```bash
+cd ../07-audit-resume
+uv run python -m unittest discover --start-directory tests --verbose
+./scripts/deploy-audit-resume.sh --region us-west-2
+uv run app/invoke_eks.py --region us-west-2 --prompt "What is the balance on customer ID 123456's mortgage?"
+uv run app/invoke_eks.py --region us-west-2 --trail last
+```
+
+The deployment updates only the `mortgage-assistant` application and needs no new infrastructure or IAM permissions: audit, execution, lease, and ledger items use the existing memory table. See [`07-audit-resume/README.md`](07-audit-resume/README.md) for the design, API, SDK limits, and the resume and approval exercises.
+
 ## Standalone Setup Limitation
 
 To provision only the shared base resources outside Workshop Studio:
@@ -169,6 +189,6 @@ hoc MCP server; use a Workshop Studio-provisioned environment for those labs.
 
 ## Cleanup
 
-Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
+Each deployment module documents its own cleanup scope. Lab 6 and Lab 7 cleanup delete only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
 
 Shared infrastructure cleanup is destructive and charge-impacting. Run it only in a standalone environment you intentionally provisioned and only after confirming the AWS account and Region.
