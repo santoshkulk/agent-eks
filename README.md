@@ -21,68 +21,9 @@ Numbered application modules are self-contained checkpoints. Runtime modules do 
 
 ## Reference Architecture
 
-The diagram shows the application as it stands after Lab 6. Solid elements exist after Labs 0 through 4; dashed elements are added by Labs 5 and 6 and need a Workshop Studio environment. An editable draw.io version with AWS icons is in [`architecture.drawio`](architecture.drawio).
+The diagram shows the application as it stands after Lab 6. Solid elements exist after Labs 0 through 4; dashed elements are added by Labs 5 and 6 and need a Workshop Studio environment.
 
-```mermaid
-flowchart LR
-  client["Participant client<br/>invoke_eks.py / curl<br/>X-API-Key"]
-
-  subgraph aws["AWS Cloud: us-west-2"]
-    subgraph vpc["VPC"]
-      nlb["Network Load Balancer"]
-      subgraph eks["Amazon EKS cluster"]
-        subgraph app["Namespace: mortgage-assistant"]
-          subgraph dep["Deployment: 2 replicas, FastAPI :8080"]
-            sup["mortgage_supervisor<br/>(Strands Agent)"]
-            sp1["general_mortgage_specialist"]
-            sp2["existing_mortgage_specialist"]
-            sp3["new_application_specialist"]
-            mem["Session + durable memory"]
-            aud["Audit trail, tool ledger,<br/>approvals, resume"]
-            mcpc["MCPClient (Lab 6)"]
-            otel["OpenTelemetry exporter (Lab 5)"]
-          end
-        end
-        subgraph ks["Namespace: kube-system"]
-          lbc["AWS Load Balancer Controller"]
-          pia["EKS Pod Identity Agent"]
-        end
-        subgraph cs["Namespace: credit-services (Lab 6)"]
-          mcps["credit-score-mcp :8081<br/>get_credit_score"]
-        end
-        lf["Self-hosted Langfuse (Lab 5)"]
-      end
-    end
-    bedrock["Amazon Bedrock<br/>Claude Sonnet 4.6"]
-    kb["Bedrock Knowledge Base"]
-    s3["S3 data source"]
-    oss["OpenSearch Serverless<br/>vector collection"]
-    ddb["DynamoDB<br/>sessions, memory, vectors,<br/>audit, ledger"]
-    kms["KMS key"]
-    ecr["Amazon ECR"]
-    iam["IAM role<br/>(Pod Identity)"]
-    ssm["Parameter Store<br/>/workshop/mortgage-assistant/*"]
-  end
-
-  client -->|"1 request"| nlb
-  nlb -->|"2 :8080"| dep
-  sup -->|"3 agents-as-tools"| sp1 & sp2 & sp3
-  dep -->|"4 InvokeModel"| bedrock
-  sp1 -->|"5 Retrieve"| kb
-  s3 -->|ingest| kb
-  kb --> oss
-  mem -->|"6 state"| ddb
-  aud --> ddb
-  ddb -.->|encrypted by| kms
-  ecr -.->|pull image| eks
-  lbc -.->|provisions| nlb
-  pia -.->|assume role| iam
-  mcpc -.->|"MCP (Streamable HTTP)"| mcps
-  otel -.->|OTLP| lf
-
-  classDef optional stroke-dasharray: 5 5
-  class mcpc,otel,mcps,lf optional
-```
+![Reference architecture: mortgage assistant on Amazon EKS](images/reference-architecture.png)
 
 Request path: (1) the client calls the NLB with an API key, (2) the NLB forwards to a FastAPI pod, (3) the supervisor routes to one specialist exposed as a tool, (4) agents call Bedrock for inference, (5) the general specialist retrieves from the Knowledge Base, (6) sessions, durable memory, the audit trail and the tool ledger persist to DynamoDB. Parameter Store holds the resource names the deploy scripts discover; it is not on the request path.
 
