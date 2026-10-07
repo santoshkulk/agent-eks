@@ -129,10 +129,6 @@ class ResourceDiscoveryTests(unittest.TestCase):
             "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
             deploy,
         )
-        self.assertIn(
-            "/langfuse/otlp-endpoint",
-            deploy,
-        )
         self.assertIn("/cloudwatch/trace-log-group", deploy)
         self.assertIn(
             "/workshop/mortgage-assistant/eks/cluster-name",

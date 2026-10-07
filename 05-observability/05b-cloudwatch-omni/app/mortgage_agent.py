@@ -233,7 +233,7 @@ def create_supervisor_agent(actor_id: str, session_id: str, request_id: str) -> 
     # have no direct access to actor/session/request IDs. Stashing the same
     # attributes in a context variable lets those tool functions tag their
     # own agents so every span in the request shares one actor/session
-    # grouping in Langfuse, regardless of which EKS replica handles it.
+    # grouping in CloudWatch Omni, regardless of which EKS replica handles it.
     telemetry.set_current_trace_attributes(attributes)
     return Agent(
         model=MODEL_ID,

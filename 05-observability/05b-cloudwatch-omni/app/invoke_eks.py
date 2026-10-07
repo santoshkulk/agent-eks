@@ -13,8 +13,8 @@ import uuid
 
 
 DEFAULT_NAMESPACE = "mortgage-assistant"
-DEFAULT_SERVICE = "mortgage-assistant"
-DEFAULT_SECRET = "mortgage-assistant-api-key"
+DEFAULT_SERVICE = "mortgage-assistant-omni"
+DEFAULT_SECRET = "mortgage-assistant-omni-api-key"
 DEFAULT_REGION = os.environ.get(
     "AWS_REGION",
     os.environ.get("AWS_DEFAULT_REGION", "us-west-2"),

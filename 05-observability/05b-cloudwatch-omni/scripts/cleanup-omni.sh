@@ -8,8 +8,9 @@ usage() {
   cat <<'EOT'
 Usage: 05-observability/05b-cloudwatch-omni/scripts/cleanup-omni.sh [options]
 
-Removes only the Lab 5b Deployment and Service (mortgage-assistant-omni).
-Lab 5a, the namespace, secrets, and Workshop Studio resources are kept.
+Removes only Lab 5b resources: the mortgage-assistant-omni Deployment and
+Service, and its Secret. Lab 5a, the namespace, and Workshop Studio
+resources are kept.
 
 Options:
   --region REGION     AWS Region (default: us-west-2).
@@ -39,5 +40,7 @@ aws "${AWS_OPTIONS[@]}" eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$C
 
 echo "Removing the Lab 5b application"
 kubectl delete deployment,service mortgage-assistant-omni \
+  --namespace mortgage-assistant --ignore-not-found
+kubectl delete secret mortgage-assistant-omni-api-key \
   --namespace mortgage-assistant --ignore-not-found
 echo "Lab 5b application removed."

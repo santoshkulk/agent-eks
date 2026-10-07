@@ -1,7 +1,7 @@
 [project]
 name = "mortgage-workshop-lab-05b"
 version = "0.1.0"
-description = "Send the EKS mortgage assistant traces to CloudWatch Omni, alongside Langfuse"
+description = "Send the EKS mortgage assistant traces to Amazon CloudWatch Omni"
 requires-python = ">=3.12"
 dependencies = [
     "aws-opentelemetry-distro>=0.20.0",

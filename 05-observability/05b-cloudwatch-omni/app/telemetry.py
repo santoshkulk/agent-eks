@@ -1,71 +1,43 @@
-"""Export Strands agent traces to CloudWatch Omni and, optionally, Langfuse.
+"""Attach the Strands mortgage assistant to the ADOT tracer provider for CloudWatch Omni.
 
-Lab 5B variant of Lab 5's telemetry module. The application is started under
-`opentelemetry-instrument` with the AWS Distro for OpenTelemetry (ADOT). The
-distro registers the process-wide tracer provider and exports every span to
-CloudWatch over the regional X-Ray OTLP endpoint, signed with the pod's
-EKS Pod Identity role; CloudWatch Omni reads those traces. OpenTelemetry uses
-only the first provider registered, so this module never creates a second
-one when the distro is running. It attaches to the distro's provider instead:
+The application is started under `opentelemetry-instrument` with the AWS Distro
+for OpenTelemetry (ADOT). The distro registers the process-wide tracer provider
+and exports every span to CloudWatch over the regional X-Ray OTLP endpoint,
+signed with the pod's EKS Pod Identity role. CloudWatch Omni reads those traces
+through Transaction Search.
 
-- Strands is handed the distro's provider so its agent, model, and tool spans
-  reach it.
-- When LANGFUSE_OTLP_ENDPOINT is set, one extra span processor sends the same
-  spans to Langfuse. Leave it unset for a CloudWatch-only deployment.
+OpenTelemetry uses only the first tracer provider registered, so this module
+never creates one. It hands the distro's provider to Strands so the agent,
+model, and tool spans reach it, and it adds a root span per API request.
 
-Outside the distro (for example local unit tests), the module falls back to
-Lab 5's behavior: it builds its own provider, and only if a Langfuse endpoint
-is configured.
+The CloudWatch export itself is configured by the ADOT environment variables in
+k8s/service.template.yaml (AGENT_OBSERVABILITY_ENABLED, OTEL_*), not here.
+OTEL_EXPORTER_OTLP_ENDPOINT must stay unset: ADOT would use it instead of the
+X-Ray endpoint.
 
-Configuration is environment-driven and optional:
-
-- LANGFUSE_OTLP_ENDPOINT   Langfuse OTLP/HTTP endpoint, for example
-                           http://<langfuse-host>:3000/api/public/otel/v1/traces
-- LANGFUSE_OTLP_HEADERS    "Authorization=Basic <base64>,x-langfuse-ingestion-version=4"
-- TELEMETRY_MASK_CONTENT   "true" to redact prompt/response attribute values
-                           on the Langfuse path (see below)
-
-The CloudWatch path is configured by the ADOT environment variables in
-k8s/service.template.yaml, not by this module. Lab 5 used
-OTEL_EXPORTER_OTLP_ENDPOINT for Langfuse; this lab deliberately leaves it
-unset because the distro would otherwise send spans there instead of to
-CloudWatch.
-
-Any failure while configuring or using telemetry is logged and swallowed; it
-never blocks request handling or readiness.
+When ADOT is not running (for example in unit tests or a local run), tracing is
+disabled: no exporter is created and no network calls are made. Any failure
+while configuring or using telemetry is logged and swallowed; it never blocks
+request handling or readiness.
 
 Prompt and response capture
 ----------------------------
-Strands' automatic instrumentation records prompt and response text as span
-attributes such as `gen_ai.user.message`, `gen_ai.assistant.message`,
-`gen_ai.choice`, and `system_prompt`. Those attributes are visible in
-Langfuse alongside latency, token usage, and tool calls. For this workshop's
-mock data that visibility is the point of the lab. A deployment handling real
-customer data should choose one of:
-
-- Run without the distro and without LANGFUSE_OTLP_ENDPOINT to disable
-  tracing entirely.
-- Set TELEMETRY_MASK_CONTENT=true so this module strips the prompt/response
-  attribute values (see `_CONTENT_ATTRIBUTES`) before spans leave the process
-  for Langfuse. This does NOT cover the CloudWatch path: ADOT exports its own
-  copy, and AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true keeps content on those
-  spans so Omni can show it.
-- Apply redaction or access controls further downstream in the
-  observability backend instead of, or in addition to, the above.
+Strands records prompt and response text as span attributes such as
+`gen_ai.user.message`, `gen_ai.assistant.message`, and `gen_ai.choice`.
+AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true keeps that text on the spans so Agent
+traces and evaluators in Omni can show it. Use only synthetic data in this lab.
+For real customer data, leave that variable unset so ADOT moves content off the
+spans, and see the CloudWatch Omni data protection guidance.
 """
 
 from __future__ import annotations
 
 import contextvars
 import logging
-import os
-import typing
 from contextlib import AbstractContextManager
 from types import TracebackType
 
 from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 
 logger = logging.getLogger("telemetry")
@@ -74,143 +46,33 @@ _trace_attributes_var: contextvars.ContextVar[dict[str, object] | None] = (
     contextvars.ContextVar("trace_attributes", default=None)
 )
 
-_CONTENT_ATTRIBUTES = (
-    "gen_ai.user.message",
-    "gen_ai.assistant.message",
-    "gen_ai.choice",
-    "gen_ai.choice.message",
-    "gen_ai.choice.tool.result",
-    "system_prompt",
-)
-
 _initialized = False
 _tracer = trace.get_tracer(__name__)
 
 
-def _mask_content_enabled() -> bool:
-    return os.environ.get("TELEMETRY_MASK_CONTENT", "false").strip().lower() == "true"
-
-
-def _parse_headers(raw: str) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair or "=" not in pair:
-            continue
-        key, _, value = pair.partition("=")
-        headers[key.strip()] = value.strip()
-    return headers
-
-
-class _RedactingSpanExporter(SpanExporter):
-    """Wrap a real span exporter, redacting prompt/response attributes.
-
-    A `SpanProcessor.on_end` hook cannot do this redaction: once a span has
-    ended, the OTel SDK makes its `ReadableSpan.attributes` immutable (item
-    assignment raises `TypeError`), specifically so processors only read
-    finished spans rather than mutate them. Wrapping the exporter instead
-    rebuilds each span with masked attribute values -- using only public
-    `ReadableSpan` fields -- immediately before the real exporter turns it
-    into an OTLP request; this is the last point before the data leaves the
-    process. Never raises; a failure to redact must not prevent export or
-    crash the process.
-    """
-
-    def __init__(self, wrapped: SpanExporter) -> None:
-        self._wrapped = wrapped
-
-    def export(self, spans: typing.Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._wrapped.export([self._redact(span) for span in spans])
-
-    def _redact(self, span: ReadableSpan) -> ReadableSpan:
-        try:
-            attributes = dict(span.attributes or {})
-        except Exception:
-            return span
-        if not any(key in attributes for key in _CONTENT_ATTRIBUTES):
-            return span
-        for key in _CONTENT_ATTRIBUTES:
-            if key in attributes:
-                attributes[key] = "[redacted]"
-        try:
-            return ReadableSpan(
-                name=span.name,
-                context=span.context,
-                parent=span.parent,
-                resource=span.resource,
-                attributes=attributes,
-                events=span.events,
-                links=span.links,
-                kind=span.kind,
-                status=span.status,
-                start_time=span.start_time,
-                end_time=span.end_time,
-                instrumentation_scope=getattr(span, "instrumentation_scope", None),
-            )
-        except Exception:
-            logger.debug("Unable to redact span %s; exporting it unmasked.", span.name)
-            return span
-
-    def shutdown(self) -> None:
-        self._wrapped.shutdown()
-
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        force_flush = getattr(self._wrapped, "force_flush", None)
-        if callable(force_flush):
-            return bool(force_flush(timeout_millis))
-        return True
-
-
 def init_telemetry() -> None:
-    """Attach Strands (and optionally Langfuse) to the tracer provider. Never raises."""
+    """Hand the ADOT tracer provider to Strands, once per process. Never raises."""
     global _initialized, _tracer
     if _initialized:
         return
     _initialized = True
 
-    endpoint = os.environ.get("LANGFUSE_OTLP_ENDPOINT", "").strip()
-
     try:
+        provider = trace.get_tracer_provider()
+        # ADOT (opentelemetry-instrument) has already registered a real
+        # provider. Without it there is nothing to export to, so stay disabled
+        # rather than creating a second provider.
+        if not hasattr(provider, "add_span_processor"):
+            logger.info("ADOT is not running; tracing is disabled.")
+            return
+
         from strands.telemetry import StrandsTelemetry
 
-        provider = trace.get_tracer_provider()
-        # The ADOT distro (opentelemetry-instrument) has already registered a
-        # real provider. Never replace it: OpenTelemetry keeps only the first.
-        distro_running = hasattr(provider, "add_span_processor")
-        if not distro_running:
-            if not endpoint:
-                logger.info(
-                    "ADOT is not running and LANGFUSE_OTLP_ENDPOINT is not set; "
-                    "tracing is disabled."
-                )
-                return
-            provider = TracerProvider()
-            trace.set_tracer_provider(provider)
-
         # Passing the provider makes StrandsTelemetry skip its own global
-        # registration; an orphaned provider of its own would never export.
+        # registration; a provider of its own would never export.
         StrandsTelemetry(tracer_provider=provider)
-
-        if endpoint:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter,
-            )
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-            exporter: SpanExporter = OTLPSpanExporter(
-                endpoint=endpoint,
-                headers=_parse_headers(os.environ.get("LANGFUSE_OTLP_HEADERS", "")),
-            )
-            if _mask_content_enabled():
-                exporter = _RedactingSpanExporter(exporter)
-            provider.add_span_processor(BatchSpanProcessor(exporter))
-
         _tracer = trace.get_tracer(__name__)
-        logger.info(
-            "Tracing configured: CloudWatch via ADOT=%s, Langfuse=%s",
-            distro_running,
-            bool(endpoint),
-        )
+        logger.info("Tracing configured: spans are exported to CloudWatch by ADOT.")
     except Exception:
         logger.exception("Failed to configure tracing; continuing without it.")
 
@@ -224,7 +86,7 @@ def trace_attributes(
 
     Applying the same mapping to the supervisor and every specialist agent
     keeps actor/session grouping consistent across the whole request, and
-    across both EKS replicas, since grouping in Langfuse is derived from
+    across both EKS replicas, since grouping in CloudWatch Omni is derived from
     these span attributes rather than from any in-process state.
     """
     return {

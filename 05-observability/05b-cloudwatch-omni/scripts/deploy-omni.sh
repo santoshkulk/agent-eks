@@ -4,12 +4,10 @@ set -euo pipefail
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
-TELEMETRY_BACKEND="both"
 PROMPT="What are the benefits of a 15-year mortgage?"
 SESSION_TTL_SECONDS="604800"
 MODEL_ID="us.anthropic.claude-sonnet-4-6"
 MEMORY_EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
-TELEMETRY_MASK_CONTENT="false"
 FAULT_INJECTION_ENABLED="false"
 FAULT_INJECTION_TOOL="get_mortgage_details"
 FAULT_INJECTION_MODE="delay"
@@ -22,24 +20,20 @@ MEMORY_VECTOR_INDEX_PARAMETER_NAME="/workshop/mortgage-assistant/memory/vector-i
 KB_PARAMETER_NAME="/workshop/mortgage-assistant/bedrock/knowledge-base-id"
 TRACE_LOG_GROUP_PARAMETER_NAME="/workshop/mortgage-assistant/cloudwatch/trace-log-group"
 OMNI_DOMAIN_URL_PARAMETER_NAME="/workshop/mortgage-assistant/cloudwatch/omni-domain-url"
-LANGFUSE_OTLP_ENDPOINT_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/otlp-endpoint"
-LANGFUSE_URL_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/url"
 
 usage() {
   cat <<'EOT'
 Usage: 05-observability/05b-cloudwatch-omni/scripts/deploy-omni.sh [options]
 
-Deploys a second Deployment, mortgage-assistant-omni, next to the Lab 5a
-application. Lab 5a is not modified.
+Deploys the mortgage assistant as mortgage-assistant-omni with its own
+Secret, exporting traces to Amazon CloudWatch Omni. It does not require
+Lab 5a and does not modify any Lab 5a resource.
 
 Options:
   --region REGION                    AWS Region (default: us-west-2).
   --profile PROFILE                  AWS CLI profile; omit to use the default profile.
-  --telemetry-backend MODE           "both" (CloudWatch Omni and Langfuse, default)
-                                     or "cloudwatch" (CloudWatch Omni only).
   --prompt TEXT                      Prompt used for the deployment smoke test.
   --session-ttl-seconds N            Short-term session retention (default: 604800).
-  --telemetry-mask-content           Redact prompt/response attributes on the Langfuse path.
   --fault-injection-enabled          Enable the fault-injection exercise at deploy time.
   --fault-injection-tool NAME        Tool name to target (default: get_mortgage_details).
   --fault-injection-mode MODE        "delay" or "error" (default: delay).
@@ -52,10 +46,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
-    --telemetry-backend) TELEMETRY_BACKEND="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
     --session-ttl-seconds) SESSION_TTL_SECONDS="$2"; shift 2 ;;
-    --telemetry-mask-content) TELEMETRY_MASK_CONTENT="true"; shift ;;
     --fault-injection-enabled) FAULT_INJECTION_ENABLED="true"; shift ;;
     --fault-injection-tool) FAULT_INJECTION_TOOL="$2"; shift 2 ;;
     --fault-injection-mode) FAULT_INJECTION_MODE="$2"; shift 2 ;;
@@ -72,10 +64,6 @@ for command_name in aws curl docker kubectl openssl python3 sed; do
   fi
 done
 
-if [[ "$TELEMETRY_BACKEND" != "both" && "$TELEMETRY_BACKEND" != "cloudwatch" ]]; then
-  echo "--telemetry-backend must be 'both' or 'cloudwatch'." >&2
-  exit 2
-fi
 if [[ ! "$SESSION_TTL_SECONDS" =~ ^[0-9]+$ ]] || [[ "$SESSION_TTL_SECONDS" -lt 3600 ]]; then
   echo "--session-ttl-seconds must be an integer of at least 3600." >&2
   exit 2
@@ -119,13 +107,6 @@ if [[ "$TRACE_DESTINATION" != "CloudWatchLogs"$'\t'"ACTIVE" ]]; then
   exit 1
 fi
 
-LANGFUSE_OTLP_ENDPOINT=""
-LANGFUSE_URL=""
-if [[ "$TELEMETRY_BACKEND" == "both" ]]; then
-  LANGFUSE_OTLP_ENDPOINT="$(ssm_parameter "$LANGFUSE_OTLP_ENDPOINT_PARAMETER_NAME")"
-  LANGFUSE_URL="$(ssm_parameter "$LANGFUSE_URL_PARAMETER_NAME")"
-fi
-
 MEMORY_STATUS="$(aws_cli dynamodb describe-table --table-name "$MEMORY_TABLE_NAME" \
   --query 'Table.TableStatus' --output text)"
 if [[ "$MEMORY_STATUS" != "ACTIVE" ]]; then
@@ -136,18 +117,20 @@ fi
 echo "Configuring kubectl for $CLUSTER_NAME"
 aws_cli eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME"
 
-# Lab 5a created these. They are reused read-only, never recreated here.
-if ! kubectl get secret mortgage-assistant-api-key --namespace mortgage-assistant >/dev/null 2>&1; then
-  echo "Secret mortgage-assistant-api-key not found. Complete Lab 5a first." >&2
-  exit 1
+# Namespace and ServiceAccount are the shared workshop objects; applying is idempotent.
+kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
+
+# Lab 5b owns its Secret, so it neither requires nor modifies Lab 5a.
+
+if kubectl get secret mortgage-assistant-omni-api-key \
+  --namespace mortgage-assistant >/dev/null 2>&1; then
+  API_KEY="$(kubectl get secret mortgage-assistant-omni-api-key \
+    --namespace mortgage-assistant --output jsonpath='{.data.api-key}' | base64 --decode)"
+else
+  API_KEY="$(openssl rand -hex 32)"
+  kubectl create secret generic mortgage-assistant-omni-api-key \
+    --namespace mortgage-assistant --from-literal="api-key=$API_KEY"
 fi
-if [[ "$TELEMETRY_BACKEND" == "both" ]] &&
-  ! kubectl get secret langfuse-otel-auth --namespace mortgage-assistant >/dev/null 2>&1; then
-  echo "Secret langfuse-otel-auth not found. Complete Lab 5a first, or use --telemetry-backend cloudwatch." >&2
-  exit 1
-fi
-API_KEY="$(kubectl get secret mortgage-assistant-api-key --namespace mortgage-assistant \
-  --output jsonpath='{.data.api-key}' | base64 --decode)"
 
 # X-Ray delivers each span batch into this stream.
 aws_cli logs create-log-stream \
@@ -170,9 +153,6 @@ else
 fi
 docker push "$IMAGE_URI"
 
-# Namespace and ServiceAccount are identical to Lab 5a; applying is a no-op.
-kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
-
 SERVICE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mortgage-omni-service.XXXXXX.yaml")"
 PORT_FORWARD_PID=""
 cleanup_temp() {
@@ -193,8 +173,6 @@ sed \
   -e "s|__MEMORY_EMBEDDING_MODEL_ID__|$MEMORY_EMBEDDING_MODEL_ID|g" \
   -e "s|__MEMORY_SESSION_TTL_SECONDS__|$SESSION_TTL_SECONDS|g" \
   -e "s|__TRACE_LOG_GROUP__|$TRACE_LOG_GROUP|g" \
-  -e "s|__LANGFUSE_OTLP_ENDPOINT__|$LANGFUSE_OTLP_ENDPOINT|g" \
-  -e "s|__TELEMETRY_MASK_CONTENT__|$TELEMETRY_MASK_CONTENT|g" \
   -e "s|__FAULT_INJECTION_ENABLED__|$FAULT_INJECTION_ENABLED|g" \
   -e "s|__FAULT_INJECTION_TOOL__|$FAULT_INJECTION_TOOL|g" \
   -e "s|__FAULT_INJECTION_MODE__|$FAULT_INJECTION_MODE|g" \
@@ -249,13 +227,9 @@ cat <<EOT
 
 Lab 5b completed.
   Image: $IMAGE_URI
-  Telemetry backend: $TELEMETRY_BACKEND
   Trace log group: $TRACE_LOG_GROUP
   CloudWatch Omni: $OMNI_DOMAIN_URL
 EOT
-if [[ -n "$LANGFUSE_URL" ]]; then
-  echo "  Langfuse UI: $LANGFUSE_URL"
-fi
 if [[ -n "$SMOKE_TRACE_ID" ]]; then
   echo "  Smoke-test trace ID: $SMOKE_TRACE_ID"
   echo

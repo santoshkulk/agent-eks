@@ -55,7 +55,7 @@ class ApiContractTests(unittest.TestCase):
     def test_trace_id_is_absent_when_tracing_is_not_configured(
         self, run_prompt
     ) -> None:
-        # No LANGFUSE_OTLP_ENDPOINT is set in the test environment, so
+        # No ADOT is not running in the test environment, so
         # telemetry.init_telemetry() disabled tracing at import time; the
         # response must still include the field, just as None.
         response = self.client.post(

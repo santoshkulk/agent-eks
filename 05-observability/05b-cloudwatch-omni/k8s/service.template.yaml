@@ -80,11 +80,6 @@ spec:
               value: none
             - name: OTEL_METRICS_EXPORTER
               value: none
-            # Langfuse path (empty for a CloudWatch-only deployment).
-            - name: LANGFUSE_OTLP_ENDPOINT
-              value: "__LANGFUSE_OTLP_ENDPOINT__"
-            - name: TELEMETRY_MASK_CONTENT
-              value: "__TELEMETRY_MASK_CONTENT__"
             - name: FAULT_INJECTION_ENABLED
               value: "__FAULT_INJECTION_ENABLED__"
             - name: FAULT_INJECTION_TOOL
@@ -96,14 +91,8 @@ spec:
             - name: MORTGAGE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: mortgage-assistant-api-key
+                  name: mortgage-assistant-omni-api-key
                   key: api-key
-            - name: LANGFUSE_OTLP_HEADERS
-              valueFrom:
-                secretKeyRef:
-                  name: langfuse-otel-auth
-                  key: otlp-headers
-                  optional: true
             - name: HOME
               value: /tmp
           readinessProbe:
