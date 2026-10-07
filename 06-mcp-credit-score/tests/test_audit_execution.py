@@ -129,6 +129,14 @@ class AuditTrailTests(unittest.TestCase):
             hook._before_tool_call(event)
         self.assertFalse(event.cancel_tool)
 
+    def test_explanation_flags_a_missing_rationale(self) -> None:
+        trail = self.trail()
+        trail.record("decision", "supervisor", {"text": "", "tool_uses": [{"name": "x_specialist", "toolUseId": "u9"}]})
+        trail.record("tool_call", "supervisor", {"tool": "x_specialist", "toolUseId": "u9", "status": "success", "result": []})
+        explanation = build_explanation(load_records(self.store, ACTOR, SESSION, "req"), {"x_specialist"})
+        self.assertFalse(explanation["route"][0]["rationale_recorded"])
+        self.assertEqual(explanation["route"][0]["reason"], "")
+
     def test_explanation_links_route_reason_and_evidence(self) -> None:
         trail = self.trail()
         trail.record(
@@ -154,6 +162,7 @@ class AuditTrailTests(unittest.TestCase):
             load_records(self.store, ACTOR, SESSION, "req"), {"existing_mortgage_specialist"}
         )
         self.assertEqual(explanation["route"][0]["reason"], "Routing rationale: account question")
+        self.assertTrue(explanation["route"][0]["rationale_recorded"])
         self.assertEqual(explanation["evidence"], ["principal 150000"])
         self.assertEqual(explanation["memories_used"][0]["key"], "memories/1")
 

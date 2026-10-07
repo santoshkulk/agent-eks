@@ -260,7 +260,9 @@ S3 with Object Lock and enable CloudTrail data events (neither is provisioned).
 ## Explainability
 
 - The supervisor writes a `Routing rationale:` sentence before delegating; the
-  audit trail links it to the specialist call it caused.
+  audit trail links it to the specialist call it caused. The sentence is model
+  output, so it is occasionally missing: each `explanation.route` entry then has an
+  empty `reason` and `rationale_recorded: false`.
 - Specialists return `answer`, `rationale`, `evidence`, and `assumptions`; the
   evidence survives in the audit trail.
 - Every `/invoke` response carries `explanation`: `route`, `tools_used`,

@@ -422,6 +422,8 @@ def build_explanation(records: list[dict[str, Any]], specialist_tools: set[str])
                     {
                         "agent": data["tool"],
                         "reason": rationale_by_tool_use.get(data["toolUseId"], ""),
+                        # False when the model delegated without writing a rationale first.
+                        "rationale_recorded": bool(rationale_by_tool_use.get(data["toolUseId"])),
                         "status": data["status"],
                     }
                 )
