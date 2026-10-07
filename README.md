@@ -164,8 +164,10 @@ See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the com
 
 ## Lab 7: Audit, Explain, and Resume Agent Executions
 
+Lab 7 requires Labs 0, 5, and 6 in a Workshop Studio environment. Do not run the Lab 6 cleanup first: it deletes the Langfuse Secret that Lab 7 reuses.
+
 ```bash
-cd ../07-audit-resume
+cd ../07-audit-resume   # from the repository root: cd 07-audit-resume
 uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-audit-resume.sh --region us-west-2
 uv run app/invoke_eks.py --region us-west-2 --prompt "What is the balance on customer ID 123456's mortgage?"
@@ -183,7 +185,7 @@ To provision only the shared base resources outside Workshop Studio:
 ```
 
 This is sufficient for Labs 1 through 4. It is not sufficient for Lab 5 or
-Lab 6 because it does not provision the self-hosted Langfuse stack or the
+Lab 6 (and therefore Lab 7) because it does not provision the self-hosted Langfuse stack or the
 credit-score MCP server. Do not substitute another MCP URL or deploy an ad
 hoc MCP server; use a Workshop Studio-provisioned environment for those labs.
 

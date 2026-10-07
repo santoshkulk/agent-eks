@@ -18,6 +18,7 @@ APPROVAL_REQUIRED_TOOLS="create_loan_application"
 LEASE_SECONDS="180"
 ENABLE_REASONING="false"
 SNAPSHOT_HISTORY="true"
+IMAGE_URI_OVERRIDE=""
 CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
 MEMORY_TABLE_PARAMETER_NAME="/workshop/mortgage-assistant/memory/table-name"
@@ -50,6 +51,8 @@ Options:
                                      after it expires (default: 180).
   --enable-reasoning                 Capture Bedrock extended-thinking in the audit trail.
   --no-snapshot-history              Keep only the latest snapshot per agent.
+  --image-uri URI                    Deploy an image that is already in ECR and skip the
+                                     build and push (change settings in about 2 minutes).
   --fault-injection-delay-seconds N  Delay used in "delay" mode (default: 5).
   -h, --help                         Show this help.
 EOF
@@ -70,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --lease-seconds) LEASE_SECONDS="$2"; shift 2 ;;
     --enable-reasoning) ENABLE_REASONING="true"; shift ;;
     --no-snapshot-history) SNAPSHOT_HISTORY="false"; shift ;;
+    --image-uri) IMAGE_URI_OVERRIDE="$2"; shift 2 ;;
     --fault-injection-delay-seconds) FAULT_INJECTION_DELAY_SECONDS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -152,14 +156,19 @@ if [[ -z "$KNOWLEDGE_BASE_ID" ]]; then
   exit 1
 fi
 
-MEMORY_STATUS="$(aws_cli dynamodb describe-table \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query 'Table.TableStatus' \
-  --output text)"
-MEMORY_INDEX_STATUS="$(aws_cli dynamodb describe-table \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query "Table.VectorIndexes[?IndexName=='${MEMORY_VECTOR_INDEX_NAME}'].IndexStatus | [0]" \
-  --output text)"
+# boto3 (pinned in uv.lock) instead of the AWS CLI: older CLI v2 releases omit VectorIndexes.
+MEMORY_CHECK_OPTIONS=(
+  --table-name "$MEMORY_TABLE_NAME"
+  --vector-index-name "$MEMORY_VECTOR_INDEX_NAME"
+  --region "$REGION"
+)
+if [[ -n "$PROFILE" ]]; then
+  MEMORY_CHECK_OPTIONS+=(--profile "$PROFILE")
+fi
+read -r MEMORY_STATUS MEMORY_INDEX_STATUS < <(
+  uv run --project "$MODULE_DIR" --frozen python \
+    "$MODULE_DIR/scripts/check_memory_ready.py" "${MEMORY_CHECK_OPTIONS[@]}"
+)
 if [[ "$MEMORY_STATUS" != "ACTIVE" || "$MEMORY_INDEX_STATUS" != "ACTIVE" ]]; then
   echo "Workshop Studio memory storage is not ready." >&2
   echo "  Table: $MEMORY_STATUS" >&2
@@ -203,6 +212,7 @@ if ! kubectl get secret langfuse-otel-auth \
   --namespace mortgage-assistant >/dev/null 2>&1; then
   echo "The Langfuse OTLP Secret from Lab 5 is missing." >&2
   echo "Complete the Lab 5 observability deployment before running Lab 7." >&2
+  echo "(Lab 6 cleanup deletes the mortgage-assistant namespace, including this Secret.)" >&2
   exit 1
 fi
 
@@ -222,24 +232,29 @@ IMAGE_TAG="lab07-agent-$(date -u +%Y%m%d%H%M%S)"
 IMAGE_URI="${REPOSITORY_URI}:${IMAGE_TAG}"
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
-echo "Logging Docker into $REGISTRY"
-aws_cli ecr get-login-password |
-  docker login --username AWS --password-stdin "$REGISTRY"
-
-echo "Building $IMAGE_URI for EKS x86_64 nodes"
-if docker buildx version >/dev/null 2>&1; then
-  docker buildx build \
-    --platform linux/amd64 \
-    --tag "$IMAGE_URI" \
-    --load \
-    "$MODULE_DIR"
+if [[ -n "$IMAGE_URI_OVERRIDE" ]]; then
+  IMAGE_URI="$IMAGE_URI_OVERRIDE"
+  echo "Reusing image $IMAGE_URI (skipping build and push)"
 else
-  docker build \
-    --platform linux/amd64 \
-    --tag "$IMAGE_URI" \
-    "$MODULE_DIR"
+  echo "Logging Docker into $REGISTRY"
+  aws_cli ecr get-login-password |
+    docker login --username AWS --password-stdin "$REGISTRY"
+
+  echo "Building $IMAGE_URI for EKS x86_64 nodes"
+  if docker buildx version >/dev/null 2>&1; then
+    docker buildx build \
+      --platform linux/amd64 \
+      --tag "$IMAGE_URI" \
+      --load \
+      "$MODULE_DIR"
+  else
+    docker build \
+      --platform linux/amd64 \
+      --tag "$IMAGE_URI" \
+      "$MODULE_DIR"
+  fi
+  docker push "$IMAGE_URI"
 fi
-docker push "$IMAGE_URI"
 
 kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
 
@@ -457,8 +472,10 @@ The credit-score MCP server resources in credit-services were verified but not m
 The existing mortgage-assistant API key and Langfuse OTLP Secret were reused
 and were not printed.
 
-Invoke the integrated agent:
-  cd 07-audit-resume
+Try it (from 07-audit-resume):
   uv run app/invoke_eks.py --region $REGION --prompt \\
-    "Get the credit score for synthetic customer ID workshop-customer-12345."
+    "What is the balance on customer ID 123456's mortgage?"
+  uv run app/invoke_eks.py --region $REGION --trail last
+
+To change settings without rebuilding, rerun with: --image-uri $IMAGE_URI
 EOF

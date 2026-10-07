@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 from pathlib import Path
@@ -176,6 +177,11 @@ def call_api(
         raise RuntimeError(f"EKS API returned HTTP {error.code}: {detail}") from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"Unable to reach the EKS API: {error.reason}") from error
+    except (http.client.HTTPException, ConnectionError, TimeoutError) as error:
+        raise RuntimeError(
+            f"The EKS API closed the connection ({type(error).__name__}); "
+            "the pod may have restarted"
+        ) from error
 
 
 def invoke(
@@ -383,6 +389,7 @@ def main() -> int:
     if not args.prompt and not args.show_context and not any(actions):
         parser.error("--prompt is required unless --show-context or a request action is used")
 
+    sent_request_id: str | None = None
     try:
         actor_id = args.actor_id or discover_actor_id(args.profile, args.region)
         state = load_state(args.state_file)
@@ -437,6 +444,7 @@ def main() -> int:
             )
         else:
             request_id = args.request_id or str(uuid.uuid4())
+            sent_request_id = request_id
             requests[actor_id] = request_id
             save_state(args.state_file, state)
             result = invoke(
@@ -446,6 +454,12 @@ def main() -> int:
             )
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
+        if sent_request_id:
+            print(
+                f"Request ID: {sent_request_id} "
+                f"(retry with --resume {sent_request_id}, or --trail {sent_request_id})",
+                file=sys.stderr,
+            )
         return 1
 
     if args.json:

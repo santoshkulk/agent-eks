@@ -27,7 +27,7 @@ POST /invoke ──► Orchestrator (lease, audit trail, status)
 - Every agent has its own `SnapshotSessionManager` under the same `session_id` and a distinct `agent_id` (`supervisor`, `general`, `existing`, `new_application`). The new-application specialist now remembers the fields it has already collected.
 - Swarm and Graph were not used: they cannot persist member agents, and `SnapshotSessionManager` rejects multi-agent orchestrators.
 
-All state lives in the existing DynamoDB table, so **no infrastructure or IAM change is needed**. The pod role already allows `GetItem`, `PutItem`, and `Query` on it.
+All state lives in the existing DynamoDB table, so **no infrastructure or IAM change is needed** for the application. The pod role already allows `GetItem`, `PutItem`, and `Query` on it.
 
 | Sort-key prefix (under `pk=user/<actor_id>`) | Contents |
 | --- | --- |
@@ -89,6 +89,18 @@ Hash chaining makes tampering evident, not impossible. For production, also stre
 
 Configuration added to the Deployment: `APPROVAL_REQUIRED_TOOLS`, `LEASE_SECONDS`, `ENABLE_REASONING`, `SNAPSHOT_HISTORY`. The fault-injection `abort` mode (fails the request after the faulty tool returns) and `crash` mode (kills the process mid-turn) are new.
 
+## Prerequisites
+
+- Labs 0 and 5 completed in a Workshop Studio environment (Lab 6 is also required: Lab 7 keeps the credit-score MCP tool). **Do not run the Lab 6 cleanup script before Lab 7:** it deletes the `mortgage-assistant` namespace, including the `langfuse-otel-auth` Secret that Lab 7 reads.
+- On your machine: `aws` (v2), `kubectl`, `uv`, `curl`, `python3`, `openssl`, and a `docker` CLI that can build and push (Docker, or Finch with a `docker` alias). The deploy script falls back to plain `docker build` when `buildx` is missing.
+- AWS credentials for the workshop account. `app/inspect_audit.py` also needs `ssm:GetParameter`, `sts:GetCallerIdentity`, and DynamoDB `GetItem`/`Query` on the memory table; everything else in this lab goes through the API.
+
+All commands below run from the `07-audit-resume` directory:
+
+```bash
+cd 07-audit-resume    # from the repository root
+```
+
 ### Deploy flags added in Lab 7
 
 | Flag | Effect |
@@ -97,17 +109,19 @@ Configuration added to the Deployment: `APPROVAL_REQUIRED_TOOLS`, `LEASE_SECONDS
 | `--lease-seconds N` | Per-session lease, at least 30 (default 180). |
 | `--enable-reasoning` | Capture Bedrock extended-thinking in the audit trail. |
 | `--no-snapshot-history` | Keep only the latest snapshot per agent. |
+| `--image-uri URI` | Reuse an image already in ECR and skip the build and push (about 2 minutes instead of about 12). |
 | `--fault-injection-mode abort\|crash` | Fail the request after the faulty tool returns, or kill the process mid-turn. |
 
-All Lab 6 flags (`--service-access-cidr`, `--telemetry-mask-content`, `--fault-injection-*`) still apply.
+All Lab 6 flags (`--service-access-cidr`, `--telemetry-mask-content`, `--fault-injection-*`) still apply. Fault injection is wired into `get_mortgage_details` only; other tool names do nothing.
 
 ## Run the tests
 
 ```bash
-cd 07-audit-resume
 uv sync --frozen
 uv run python -m unittest discover tests
 ```
+
+The first `uv sync` downloads the Strands and boto3 dependencies (a minute or two).
 
 `tests/test_agent_flows.py` runs the real supervisor, `as_tool` specialists, hooks, snapshots, and orchestrator with a scripted model, covering audit and explanation, replay, rollback and resume, approval across a restart, and denial.
 
@@ -116,41 +130,83 @@ uv run python -m unittest discover tests
 Complete Lab 5 and use the same Workshop Studio environment as Lab 6, then:
 
 ```bash
-./07-audit-resume/scripts/deploy-audit-resume.sh --region us-west-2
+./scripts/deploy-audit-resume.sh --region us-west-2
 ```
 
 The script reuses the Lab 5/6 API-key and Langfuse Secrets, builds `lab07-agent-*`, applies the manifest, and smoke-tests an invocation. The smoke test also fetches the audit trail, requires `chain_valid`, and replays the `request_id`.
 
 ## Exercises
 
-```bash
-cd 07-audit-resume
+Request IDs identify a request. `--prompt` creates one for you and remembers it in `.workshop/client-state.json` (per actor), and `last` means that most recent `--prompt`. The session ID is printed as `Session:` on every call.
 
-# 1. Audit and explain a request.
+### 1. Audit and explain a request
+
+```bash
 uv run app/invoke_eks.py --prompt "What is the balance on customer ID 123456's mortgage?"
 uv run app/invoke_eks.py --trail last
-
-# 2. Resume a failed request. Deploy with the abort fault, then:
-./scripts/deploy-audit-resume.sh --fault-injection-enabled --fault-injection-mode abort
-uv run app/invoke_eks.py --request-id demo-1 --prompt "What is the balance on customer ID 123456's mortgage?"   # HTTP 500
-./scripts/deploy-audit-resume.sh                                                                                   # remove the fault
-uv run app/invoke_eks.py --resume demo-1                                                                           # attempt 2
-uv run app/invoke_eks.py --trail demo-1                                                                            # both attempts, one chain
-
-# 3. Approve a side effect.
-uv run app/invoke_eks.py --prompt "Start a new application: customer 123456, Sam, age 30, income 90000, expenses 40000."
-kubectl rollout restart deployment/mortgage-assistant -n mortgage-assistant   # the pause survives
-uv run app/invoke_eks.py --approve last --reviewer pat
 ```
 
-`--fault-injection-mode crash` kills the process mid-turn; retry with the same `request_id` after `--lease-seconds` expires.
+Expect `Request ... COMPLETED (attempt 1), hash chain valid`, a `routed to existing_mortgage_specialist: Routing rationale: ...` line, tool calls under both `supervisor` and `existing`, and an ordered record list. Add `--json` for the full `explanation` block and `chain_valid`.
 
-Inspect the table directly with `uv run app/inspect_audit.py --session-id <id> [--request-id <id> --records]`.
+### 2. Resume a failed request
+
+Switch the fault on without rebuilding (`abort` fails the whole request after `get_mortgage_details` returns):
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=true FAULT_INJECTION_TOOL=get_mortgage_details FAULT_INJECTION_MODE=abort
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+
+RID=demo-$(date +%s)
+# Use a customer ID you have not asked about yet: the specialist remembers earlier answers
+# and would skip the tool (and the fault) for a customer it has already looked up.
+uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 654321's mortgage?"   # HTTP 500
+
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant FAULT_INJECTION_ENABLED=false
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+
+uv run app/invoke_eks.py --resume $RID     # completes as attempt 2
+uv run app/invoke_eks.py --trail $RID
+```
+
+The trail shows attempt 1 with a `fault_injection` record and `execution_failed`, then attempt 2 with a `rollback` record and `execution_completed`, all in one valid hash chain. The failed attempt's tool results remain in the specialist's own history, so the final answer may mention the earlier failure. (`kubectl set env` is the fast path; `./scripts/deploy-audit-resume.sh --fault-injection-enabled --fault-injection-mode abort --image-uri <image>` does the same through the script.)
+
+### 3. Approve a side effect, across a restart
+
+```bash
+uv run app/invoke_eks.py --prompt "Start a new application: customer 123456, name Sam, age 30, annual income 90000, annual expenses 40000. Create the application now."
+```
+
+A good response says `Awaiting approval for: create_loan_application` (HTTP 202). If the model asks a follow-up question instead, answer it with another `--prompt` until you see the approval request; `--approve` reports "has no pending approvals" otherwise.
+
+```bash
+kubectl rollout restart deployment/mortgage-assistant -n mortgage-assistant
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+uv run app/invoke_eks.py --approve last --reviewer pat
+uv run app/invoke_eks.py --trail last      # shows the approval by pat and one create_loan_application call
+```
+
+Until the approval is answered, any other request in the same session returns `409`.
+
+### 4. Optional: crash mid-turn
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=true FAULT_INJECTION_TOOL=get_mortgage_details FAULT_INJECTION_MODE=crash \
+  LEASE_SECONDS=30
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+RID=crash-$(date +%s)
+uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 777001's mortgage?"
+```
+
+The client reports that the connection was closed and the pod restarts (`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off (`FAULT_INJECTION_ENABLED=false`), wait for the rollout, then `--resume $RID`. Resuming before the 30 second lease expires returns `409`.
+
+Inspect the table directly with `uv run app/inspect_audit.py --session-id <Session value> [--request-id <id> --records]`.
 
 ## Cleanup
 
 ```bash
-./07-audit-resume/scripts/cleanup-audit-resume.sh
+./scripts/cleanup-audit-resume.sh
 ```
 
 This removes the `mortgage-assistant` application only. It does not touch `credit-services`, Langfuse, or other shared resources. Audit, execution, and ledger items stay in the table; delete the actor's items with the AWS console or CLI if you need to.

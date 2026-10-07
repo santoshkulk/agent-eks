@@ -161,6 +161,14 @@ if [[ -n "$CLUSTER_NAME" && "$CLUSTER_NAME" != "None" ]] &&
   fi
 fi
 
+for parameter_name in \
+  /workshop/mortgage-assistant/eks/cluster-name \
+  /workshop/mortgage-assistant/ecr/repository-uri \
+  /workshop/mortgage-assistant/memory/table-name \
+  /workshop/mortgage-assistant/memory/vector-index-name; do
+  aws_cli ssm delete-parameter --name "$parameter_name" >/dev/null 2>&1 || true
+done
+
 if aws_cli cloudformation describe-stacks \
   --stack-name "$LEGACY_MEMORY_STACK_NAME" >/dev/null 2>&1; then
   STACK_MEMORY_TABLE_NAME="$(aws_cli cloudformation describe-stacks \

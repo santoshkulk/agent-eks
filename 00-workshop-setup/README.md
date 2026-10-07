@@ -22,7 +22,7 @@ From the repository root:
 The script uses the default AWS CLI profile unless `--profile` is provided.
 It provisions the DynamoDB memory table, uploads the mortgage documents, waits
 for ingestion, configures `kubectl`, and installs the load balancer controller.
-It does not deploy the mortgage application.
+It also publishes the `/workshop/mortgage-assistant/...` Parameter Store values that Labs 3 and later read (`eks/cluster-name`, `ecr/repository-uri`, `memory/table-name`, `memory/vector-index-name`, and, from the stack, `bedrock/knowledge-base-id`); `cleanup.sh` removes them. It does not deploy the mortgage application.
 
 ## Lab 5 and Lab 6 limitations
 

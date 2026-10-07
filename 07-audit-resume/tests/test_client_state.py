@@ -54,5 +54,18 @@ class ClientStateTests(unittest.TestCase):
             self.assertEqual(invoke_eks.load_state(path), expected)
 
 
+class CallApiErrorTests(unittest.TestCase):
+    def test_dropped_connection_is_reported_without_a_traceback(self) -> None:
+        import http.client
+        from unittest.mock import patch
+
+        with patch(
+            "invoke_eks.urllib.request.urlopen",
+            side_effect=http.client.RemoteDisconnected("closed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "closed the connection"):
+                invoke_eks.call_api("http://x", "key", "POST", "/invoke", 5, body={})
+
+
 if __name__ == "__main__":
     unittest.main()
