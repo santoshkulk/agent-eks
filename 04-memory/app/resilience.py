@@ -11,10 +11,12 @@ The same hook re-applies the code's system prompt, because a restored snapshot
 otherwise overwrites it with the prompt from the day the session started.
 """
 
+import os
 from typing import Any
 
 from strands.hooks import (
     AfterInvocationEvent,
+    AfterToolCallEvent,
     BeforeInvocationEvent,
     HookProvider,
     HookRegistry,
@@ -23,6 +25,10 @@ from strands.hooks import (
 from audit import current_trail, record_event
 
 INFLIGHT_KEY = "inflight"
+
+# DynamoDB items are limited to 400 KB and each agent's whole conversation is one
+# snapshot item, so cap what a single tool result may add to the history.
+MAX_TOOL_RESULT_CHARS = int(os.environ.get("MAX_TOOL_RESULT_CHARS", "16000"))
 
 
 def _removed_count(agent: Any) -> int:
@@ -115,3 +121,32 @@ def reset_interrupt_state(agents: list[Any]) -> None:
         session_manager = getattr(agent, "_session_manager", None)
         if session_manager is not None:
             session_manager.sync_agent(agent)
+
+
+class ToolResultCapHook(HookProvider):
+    """Truncate oversized tool results before they enter the conversation history."""
+
+    def __init__(self, limit: int = MAX_TOOL_RESULT_CHARS) -> None:
+        self.limit = limit
+
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(AfterToolCallEvent, self._after_tool_call)
+
+    def _after_tool_call(self, event: AfterToolCallEvent) -> None:
+        content = event.result.get("content") or []
+        capped = []
+        changed = False
+        for block in content:
+            text = block.get("text") if isinstance(block, dict) else None
+            if isinstance(text, str) and len(text) > self.limit:
+                omitted = len(text) - self.limit
+                block = {**block, "text": text[: self.limit] + f"\n...[truncated {omitted} characters]"}
+                changed = True
+            capped.append(block)
+        if changed:
+            event.result = {**event.result, "content": capped}
+            record_event(
+                "tool_result_truncated",
+                "tool",
+                {"tool": event.tool_use["name"], "limit": self.limit},
+            )

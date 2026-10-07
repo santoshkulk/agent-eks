@@ -8,7 +8,7 @@ MODULE_DIR = Path(__file__).resolve().parents[1]
 class ManifestAndDependencyTests(unittest.TestCase):
     def test_dependencies_are_declared_without_mcp_or_otel(self) -> None:
         project = (MODULE_DIR / "pyproject.toml").read_text()
-        self.assertIn('"strands-agents>=1.56.0,<2"', project)
+        self.assertIn('"strands-agents>=1.56.0,<1.57"', project)
         self.assertIn('"strands-agents-tools==0.2.6"', project)
         self.assertIn('"strands-dynamodb-storage==0.1.2"', project)
         self.assertNotIn("mcp", project)

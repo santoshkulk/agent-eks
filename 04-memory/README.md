@@ -239,7 +239,9 @@ records, tagged with `agent_id`, `request_id`, `attempt`, and `trace_id`:
   `fault_injection`, and the `execution_*` lifecycle
 
 Records are hash-chained. `GET /executions/{request_id}` returns `chain_valid`,
-false if a record is altered, removed, or reordered. Sensitive keys
+false if a record is altered, removed, or reordered, and `anchor_valid`, which compares the
+record count and last hash stored on the execution item when the request stopped, so deleting the
+last records is also detected (`null` while a request is running). Sensitive keys
 (`AUDIT_REDACT_KEYS`) are masked and long values truncated.
 
 If an audit record for a side-effecting tool (`AUDIT_CRITICAL_TOOLS`: by default
@@ -248,7 +250,8 @@ written, the tool call is **blocked** (fail closed); these tools are also blocke
 once the session lease is lost. Other records degrade to a logged, dropped
 record, and `execution_completed` carries `dropped_records` so a gap is visible.
 Records over 32 KB keep only a digest and preview (`truncated`). Hash chaining
-makes tampering evident, not impossible; for production also stream the table to
+makes tampering evident, not impossible: someone with write access to the table can
+rewrite the chain and the anchor together. For production also stream the table to
 S3 with Object Lock and enable CloudTrail data events (neither is provisioned).
 
 ## Explainability
@@ -638,6 +641,7 @@ but the trail endpoint returns full tool results and prompts.
 | `MEMORY_TABLE_NAME`, `MEMORY_VECTOR_INDEX_NAME`, `MEMORY_EMBEDDING_MODEL_ID` | from SSM; `amazon.titan-embed-text-v2:0` | Storage and embeddings. |
 | `MEMORY_SESSION_TTL_SECONDS` | `604800` | Snapshot TTL (`--session-ttl-seconds`). |
 | `SNAPSHOT_HISTORY` | `true` | Immutable snapshot per invocation (`--no-snapshot-history`). |
+| `MAX_TOOL_RESULT_CHARS` | `16000` | Longest text a single tool result may add to a conversation; longer results are truncated (a `tool_result_truncated` audit record is written). Each agent's whole conversation is one DynamoDB item (limit 400 KB), so this keeps long sessions saveable. |
 | `APPROVAL_REQUIRED_TOOLS` | `create_loan_application` | Tools that pause for approval. |
 | `LEASE_SECONDS` | `180` | Session lease; the heartbeat renews every third of it. |
 | `ENABLE_REASONING` | `false` | Capture extended thinking. |
@@ -670,8 +674,10 @@ but the trail endpoint returns full tool results and prompts.
   specialist each restore their own copy, so `share_interrupts()` in
   `app/resilience.py` re-links them, and `reset_interrupt_state()` clears paused
   agents on cancel. Both read the SDK-private `_interrupt_state`; the approval
-  tests in `tests/test_agent_flows.py` and `tests/test_hardening.py` guard them
-  when you upgrade Strands.
+  tests in `tests/test_agent_flows.py` and `tests/test_hardening.py` guard them,
+  and `tests/test_integrity.py` checks that the private attributes still exist.
+  Strands is therefore pinned to `>=1.56.0,<1.57`; after bumping the pin, run the
+  tests and repeat the approval exercise before releasing.
 - **Throttling.** At most `AGENT_CONCURRENCY` agent turns run per pod; more return
   `429`. Uvicorn's limit of 32 connections keeps health probes from starving, and
   pods get 330 seconds to finish in-flight turns on shutdown.
@@ -723,7 +729,8 @@ verify the EKS Pod Identity permissions.
 
 ### The audit chain is invalid or records are missing
 
-`chain_valid: false` means a record was altered, removed, or reordered. A
+`chain_valid: false` means a record was altered, removed, or reordered; `anchor_valid: false` with a
+valid chain means records were removed from the end. A
 non-zero `dropped_records` on `execution_completed` means non-critical records
 could not be written; look for `Dropped non-critical audit record` in the pod logs.
 

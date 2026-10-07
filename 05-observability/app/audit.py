@@ -135,6 +135,16 @@ class AuditTrail:
         self.lease_lost = False
         self._reload_tail()
 
+    @property
+    def count(self) -> int:
+        """Number of records written so far (the next sequence number)."""
+        return self._seq
+
+    @property
+    def head(self) -> str:
+        """Hash of the last record written."""
+        return self._prev_hash
+
     def _reload_tail(self) -> None:
         existing = load_records(self.store, self.actor_id, self.session_id, self.request_id)
         self._seq = len(existing)

@@ -366,7 +366,8 @@ Two consequences follow:
 | `CREDIT_SCORE_MCP_URL` is missing, malformed, has embedded credentials, or is not the fixed URL | `/health/ready` fails and the pod is not ready. If it reached an agent run, the run would fail with a `CREDIT_SCORE_MCP_URL ...` error. |
 | The MCP server is unreachable, does not initialize within 30 seconds, or the connection fails during startup | The run fails before the supervisor is built with `The credit-score MCP server is unavailable or has an invalid contract`. This applies to every prompt, not just credit-score prompts. |
 | The server exposes anything other than exactly one tool named `get_credit_score` | Same fail-fast path, with `Credit-score MCP server must expose exactly one tool named get_credit_score; found: ...`. Extra tools are rejected rather than silently broadening agent capabilities. |
-| `get_credit_score` returns an error or times out after the supervisor has started | The error becomes an ordinary tool result with status `error`, recorded in the audit trail. The supervisor is instructed to say the score could not be retrieved without inventing one, so the request normally ends `COMPLETED` with that explanation. |
+| `get_credit_score` raises (connection reset, timeout, protocol error) after the supervisor has started | `FailFastHook` ends the request: it is `FAILED` and resumable with the same `request_id`, like a startup failure. |
+| `get_credit_score` returns an error result (for example an unknown customer) | The error becomes an ordinary tool result with status `error`, recorded in the audit trail. The supervisor is instructed to say the score could not be retrieved without inventing one, so the request normally ends `COMPLETED` with that explanation. |
 | The `tool_start` audit write fails, or the lease was lost | The call is cancelled before it reaches the MCP server (see [`get_credit_score` in the audit trail](#get_credit_score-in-the-audit-trail)). |
 
 The first two rows are fail-fast failures. The orchestrator records an `execution_failed` audit record, the execution becomes `FAILED`, and the API returns HTTP 500 with `retry with the same request_id to resume`. The client prints the request ID and the retry command:
@@ -379,7 +380,7 @@ uv run app/invoke_eks.py --request-id REQUEST_ID --prompt "SAME PROMPT"
 
 Resuming starts attempt 2 of the same request using the Lab 4 resume rules (rollback of the unfinished turn, then re-run). It reconnects to the MCP server, so it succeeds once the credit-services team has restored the server. Sending the same `request_id` with a different prompt is rejected.
 
-The `FailFastHook` from Lab 4 watches only the specialist agents-as-tools, which is why a `get_credit_score` tool error after startup is reported by the model instead of failing the request. To get a fresh attempt after such a response, send the prompt again as a new request. Re-sending the same `request_id` of a `COMPLETED` request returns the stored response (a replay) without calling the MCP server.
+`FailFastHook` from Lab 4 watches the specialist agents-as-tools and, in this lab, also treats an exception raised by `get_credit_score` (`FAIL_FAST_TOOLS` in `app/mortgage_agent.py`) as a failure. A result the tool returns with an error status is a domain answer, so the model reports it instead. To get a fresh attempt after such a response, send the prompt again as a new request. Re-sending the same `request_id` of a `COMPLETED` request returns the stored response (a replay) without calling the MCP server.
 
 ## Exercise: follow the credit-score call in the audit trail
 

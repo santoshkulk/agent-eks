@@ -26,7 +26,12 @@ from memory import (
     create_session_manager,
     validate_identifier,
 )
-from resilience import ResumeHook, reset_interrupt_state, share_interrupts
+from resilience import (
+    ResumeHook,
+    ToolResultCapHook,
+    reset_interrupt_state,
+    share_interrupts,
+)
 
 
 telemetry.init_telemetry()
@@ -155,6 +160,11 @@ def maybe_inject_fault(tool_name: str) -> None:
     time.sleep(delay_seconds)
 
 
+# Tools whose exceptions end the request (the audit trail marks it FAILED and a retry
+# with the same request_id resumes it).
+FAIL_FAST_TOOLS = frozenset({"get_credit_score"})
+
+
 class FailFastHook(HookProvider):
     """End the request when a specialist fails instead of letting the model paper over it.
 
@@ -172,7 +182,16 @@ class FailFastHook(HookProvider):
 
     def _after_tool_call(self, event: AfterToolCallEvent) -> None:
         trail = current_trail()
-        if trail is None or getattr(event.selected_tool, "tool_type", None) != "agent":
+        if trail is None:
+            return
+        if event.tool_use["name"] in FAIL_FAST_TOOLS and event.exception is not None:
+            # The tool raised (transport, timeout, protocol) instead of returning a result.
+            # A result the tool returns with isError is a domain answer the model reports.
+            trail.abort_reason = trail.abort_reason or (
+                f"{event.tool_use['name']} failed: {type(event.exception).__name__}"
+            )
+            return
+        if getattr(event.selected_tool, "tool_type", None) != "agent":
             return
         if event.result.get("status") == "error" and not event.cancel_message:
             text = " ".join(
@@ -349,6 +368,7 @@ def _hooks(agent_id: str, system_prompt: str, *, fail_fast: bool = False) -> lis
         ResumeHook(agent_id, system_prompt),
         ApprovalHook(agent_id),
         AuditHook(agent_id),
+        ToolResultCapHook(),
     ]
     if fail_fast:
         hooks.append(FailFastHook())

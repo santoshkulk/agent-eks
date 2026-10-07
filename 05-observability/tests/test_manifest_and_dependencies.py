@@ -9,7 +9,7 @@ class ManifestAndDependencyTests(unittest.TestCase):
     def test_telemetry_dependencies_are_declared(self) -> None:
         project = (MODULE_DIR / "pyproject.toml").read_text()
         self.assertNotIn("mcp", project)
-        self.assertIn('"strands-agents[otel]>=1.56.0,<2"', project)
+        self.assertIn('"strands-agents[otel]>=1.56.0,<1.57"', project)
 
     def test_manifest_combines_telemetry_and_hardening(self) -> None:
         manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()

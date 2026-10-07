@@ -77,6 +77,10 @@ class Execution:
     interrupts: list[dict[str, Any]] = field(default_factory=list)
     version: int = 0
     trace_id: str | None = None
+    # Anchor for the audit chain, written when the request stops: how many records
+    # it had and the last hash. Deleting trailing records then breaks the match.
+    audit_count: int = 0
+    audit_head: str = ""
 
     def to_attrs(self, owner: str, lease_expires_at: int) -> Attrs:
         return {
@@ -92,6 +96,8 @@ class Execution:
             "version": self.version,
             "updated_at": int(time.time()),
             "trace_id": self.trace_id or "",
+            "audit_count": self.audit_count,
+            "audit_head": self.audit_head,
         }
 
     @classmethod
@@ -109,6 +115,8 @@ class Execution:
             interrupts=json.loads(str(item.get("interrupts") or "[]")),
             version=int(item.get("version", 0)),
             trace_id=str(item.get("trace_id") or "") or None,
+            audit_count=int(item.get("audit_count", 0)),
+            audit_head=str(item.get("audit_head") or ""),
         )
 
     def summary(self) -> dict[str, Any]:
@@ -367,6 +375,13 @@ class ExecutionStore:
         )
         if not saved:
             raise SessionBusy(f"request {execution.request_id} was modified concurrently")
+
+    def set_anchor(self, execution: Execution, count: int, head: str) -> Execution:
+        """Record the audit-chain anchor on a stopped execution."""
+        execution.audit_count = count
+        execution.audit_head = head
+        self._save(execution, expect_version=execution.version)
+        return execution
 
     def _finish(self, execution: Execution, status: str) -> Execution:
         execution.status = status

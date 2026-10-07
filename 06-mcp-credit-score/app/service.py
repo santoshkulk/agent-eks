@@ -117,6 +117,11 @@ class Orchestrator:
         execution = self.executions.begin_approval(actor_id, session_id, request_id, trace_id)
         return self._run(execution, responses, trace_id, decisions=decisions)
 
+    @staticmethod
+    def _anchor(execution: Execution, trail: AuditTrail) -> None:
+        execution.audit_count = trail.count
+        execution.audit_head = trail.head
+
     def _finalize(self, action: Callable[[], Any]) -> None:
         """Retry the closing write: the agent already ran, so losing it would force a replay."""
         for attempt in range(4):
@@ -189,6 +194,7 @@ class Orchestrator:
                     {"error_type": type(error).__name__, "error": str(error)},
                 )
                 message = f"{type(error).__name__}: {error}"
+                self._anchor(execution, trail)
                 if execution.mode == "approval":
                     # The agents are still paused: let the reviewer resubmit the decisions.
                     self.executions.interrupt(execution, execution.interrupts, error=message)
@@ -202,6 +208,7 @@ class Orchestrator:
                     for item in (result.interrupts or [])
                 ]
                 trail.record("execution_interrupted", "api", {"interrupts": interrupts})
+                self._anchor(execution, trail)
                 self._finalize(lambda: self.executions.interrupt(execution, interrupts))
                 return Outcome(execution, interrupts=interrupts)
 
@@ -211,6 +218,7 @@ class Orchestrator:
                 "api",
                 {"response": response, "dropped_records": trail.dropped},
             )
+            self._anchor(execution, trail)
             self._finalize(lambda: self.executions.complete(execution, response))
             return Outcome(execution, response=response)
 
@@ -221,7 +229,7 @@ class Orchestrator:
             self.reset_agents(actor_id, session_id)
         trail = AuditTrail(self.store, actor_id, session_id, request_id, attempt=execution.attempt)
         trail.record("execution_cancelled", "api", {})
-        return execution
+        return self.executions.set_anchor(execution, trail.count, trail.head)
 
     # -- read side --------------------------------------------------------------
     def trail(self, actor_id: str, session_id: str, request_id: str) -> dict[str, Any]:
@@ -229,9 +237,18 @@ class Orchestrator:
         if execution is None:
             raise ExecutionNotFound(f"no execution {request_id}")
         records = load_records(self.store, actor_id, session_id, request_id)
+        # None while the request is running or for records written before anchors existed.
+        anchor_valid = None
+        if execution.audit_head and execution.status != "RUNNING":
+            anchor_valid = bool(
+                len(records) == execution.audit_count
+                and records
+                and records[-1]["hash"] == execution.audit_head
+            )
         return {
             "execution": execution.summary(),
             "chain_valid": verify_chain(records),
+            "anchor_valid": anchor_valid,
             "explanation": build_explanation(records, self.specialist_tools),
             "records": records,
         }

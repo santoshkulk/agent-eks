@@ -24,7 +24,12 @@ from memory import (
     create_session_manager,
     validate_identifier,
 )
-from resilience import ResumeHook, reset_interrupt_state, share_interrupts
+from resilience import (
+    ResumeHook,
+    ToolResultCapHook,
+    reset_interrupt_state,
+    share_interrupts,
+)
 
 
 MODEL_ID = os.environ.get(
@@ -337,6 +342,7 @@ def _hooks(agent_id: str, system_prompt: str, *, fail_fast: bool = False) -> lis
         ResumeHook(agent_id, system_prompt),
         ApprovalHook(agent_id),
         AuditHook(agent_id),
+        ToolResultCapHook(),
     ]
     if fail_fast:
         hooks.append(FailFastHook())
