@@ -375,20 +375,24 @@ if [[ -z "$SERVICE_ENDPOINT" ]]; then
 fi
 
 echo "Waiting for the Lab 07 mortgage API readiness endpoint"
+# The NLB's DNS name and targets come up in stages, so require two successes in a row.
+READY_STREAK=0
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \
     --connect-timeout 5 \
     --max-time 10 \
-    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
-    break
+    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null 2>&1; then
+    READY_STREAK=$((READY_STREAK + 1))
+    if [[ "$READY_STREAK" -ge 2 ]]; then
+      break
+    fi
+  else
+    READY_STREAK=0
   fi
   sleep 10
 done
 
-if ! curl --fail --silent --show-error \
-  --connect-timeout 5 \
-  --max-time 10 \
-  "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
+if [[ "$READY_STREAK" -lt 2 ]]; then
   kubectl get pods --namespace mortgage-assistant --output wide
   kubectl logs \
     --namespace mortgage-assistant \

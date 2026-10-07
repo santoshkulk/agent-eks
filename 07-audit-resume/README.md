@@ -202,7 +202,16 @@ RID=crash-$(date +%s)
 uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 777001's mortgage?"
 ```
 
-The client reports that the connection was closed and the pod restarts (`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off (`FAULT_INJECTION_ENABLED=false`), wait for the rollout, then `--resume $RID`. Resuming before the 30 second lease expires returns `409`. (A running request keeps renewing its lease, so only a crashed one expires.)
+The client reports that the connection was closed and the pod restarts (`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off before resuming, otherwise the retry runs the same tool and crashes the pod again:
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant FAULT_INJECTION_ENABLED=false
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+uv run app/invoke_eks.py --resume $RID
+uv run app/invoke_eks.py --trail $RID      # attempt 1 stops mid-turn; the next attempt starts with a rollback record
+```
+
+The rollout takes longer than the 30 second lease, so the resume normally succeeds at once. A resume inside the lease window returns `409` (the dead request still holds the session); wait for the lease to expire and retry. (A running request keeps renewing its lease, so only a crashed one expires.)
 
 Inspect the table directly with `uv run app/inspect_audit.py --session-id <Session value> [--request-id <id> --records]`.
 
