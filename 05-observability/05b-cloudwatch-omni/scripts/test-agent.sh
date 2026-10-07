@@ -11,7 +11,7 @@ usage() {
 Usage: 05-observability/05b-cloudwatch-omni/scripts/test-agent.sh [options]
 
 Sends a short series of prompts to the deployed mortgage assistant and prints
-the trace ID of each request. Look the trace IDs up in CloudWatch Omni about
+the request ID, status, and trace ID of each request. Look the trace IDs up in CloudWatch Omni about
 five minutes later.
 
 Requests:
@@ -58,7 +58,7 @@ RESULTS=()
 
 # send LABEL SESSION_ID PROMPT
 send() {
-  local label="$1" session="$2" prompt="$3" output trace_id
+  local label="$1" session="$2" prompt="$3" output row trace_id request_id status
   echo
   echo "== $label"
   echo "   Prompt:  $prompt"
@@ -69,14 +69,15 @@ send() {
     exit 1
   fi
   # The client prints Actor/Session lines before the JSON body.
-  trace_id="$(python3 -c '
+  row="$(python3 -c '
 import json, sys
 text = sys.stdin.read()
 body = json.loads(text[text.index("{"):])
 print("Response: " + str(body.get("response", ""))[:300].replace("\n", " "), file=sys.stderr)
-print(body.get("trace_id") or "")
+print((body.get("trace_id") or "none") + "|" + (body.get("request_id") or "none") + "|" + (body.get("status") or "unknown"))
 ' <<<"$output")"
-  RESULTS+=("$label|$session|${trace_id:-none}")
+  IFS='|' read -r trace_id request_id status <<<"$row"
+  RESULTS+=("$label|$session|$request_id|$status|$trace_id")
 }
 
 send "General question" "omni-test-$RUN_ID-general" \
@@ -90,10 +91,10 @@ send "Conversation, turn 2" "omni-test-$RUN_ID-memory" \
 
 echo
 echo "Trace IDs"
-printf '  %-26s %-40s %s\n' "Request" "Session" "Trace ID"
+printf '  %-26s %-40s %-38s %-10s %s\n' "Request" "Session" "Request ID" "Status" "Trace ID"
 for row in "${RESULTS[@]}"; do
-  IFS='|' read -r label session trace_id <<<"$row"
-  printf '  %-26s %-40s %s\n' "$label" "$session" "$trace_id"
+  IFS='|' read -r label session request_id status trace_id <<<"$row"
+  printf '  %-26s %-40s %-38s %-10s %s\n' "$label" "$session" "$request_id" "$status" "$trace_id"
 done
 
 OMNI_DOMAIN_URL="$(aws ${PROFILE:+--profile "$PROFILE"} --region "$REGION" ssm get-parameter \
@@ -105,4 +106,7 @@ cat <<EOT
 Open CloudWatch Omni in about five minutes and search for these trace IDs:
   ${OMNI_DOMAIN_URL:-<see /workshop/mortgage-assistant/cloudwatch/omni-domain-url>}
 The two "Conversation" requests share one session ID.
+
+To see the audit trail that belongs to a trace, run (from 05-observability/05b-cloudwatch-omni):
+  uv run app/invoke_eks.py --region $REGION --session-id <session> --trail <request id>
 EOT

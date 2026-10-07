@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import contextvars
 import logging
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from types import TracebackType
 
 from opentelemetry import trace
@@ -106,6 +107,16 @@ def set_current_trace_attributes(attributes: dict[str, object] | None) -> None:
     them threaded through every tool signature.
     """
     _trace_attributes_var.set(attributes)
+
+
+@contextmanager
+def use_trace_attributes(attributes: dict[str, object]) -> Iterator[None]:
+    """Install request attributes temporarily and always restore the context."""
+    token = _trace_attributes_var.set(attributes)
+    try:
+        yield
+    finally:
+        _trace_attributes_var.reset(token)
 
 
 def current_trace_attributes() -> dict[str, object] | None:
