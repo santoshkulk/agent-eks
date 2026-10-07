@@ -14,6 +14,11 @@ FAULT_INJECTION_ENABLED="false"
 FAULT_INJECTION_TOOL="get_mortgage_details"
 FAULT_INJECTION_MODE="delay"
 FAULT_INJECTION_DELAY_SECONDS="5"
+APPROVAL_REQUIRED_TOOLS="create_loan_application"
+LEASE_SECONDS="180"
+ENABLE_REASONING="false"
+SNAPSHOT_HISTORY="true"
+IMAGE_URI_OVERRIDE=""
 CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
 MEMORY_TABLE_PARAMETER_NAME="/workshop/mortgage-assistant/memory/table-name"
@@ -37,7 +42,17 @@ Options:
   --telemetry-mask-content           Redact prompt/response span attributes before export.
   --fault-injection-enabled          Enable the tracing fault-injection exercise.
   --fault-injection-tool NAME        Tool to target (default: get_mortgage_details).
-  --fault-injection-mode MODE        "delay" or "error" (default: delay).
+  --fault-injection-mode MODE        "delay", "error", "abort", or "crash" (default: delay).
+                                     "abort" fails the request so it can be resumed;
+                                     "crash" kills the pod process mid-turn.
+  --approval-required-tools LIST     Comma-separated tools that need human approval
+                                     (default: create_loan_application; empty disables).
+  --lease-seconds N                  Per-session lease; a crashed request can be retried
+                                     after it expires (default: 180).
+  --enable-reasoning                 Capture Bedrock extended-thinking in the audit trail.
+  --no-snapshot-history              Keep only the latest snapshot per agent.
+  --image-uri URI                    Deploy an image that is already in ECR and skip the
+                                     build and push (change settings in about 2 minutes).
   --fault-injection-delay-seconds N  Delay used in "delay" mode (default: 5).
   -h, --help                         Show this help.
 EOF
@@ -54,6 +69,11 @@ while [[ $# -gt 0 ]]; do
     --fault-injection-enabled) FAULT_INJECTION_ENABLED="true"; shift ;;
     --fault-injection-tool) FAULT_INJECTION_TOOL="$2"; shift 2 ;;
     --fault-injection-mode) FAULT_INJECTION_MODE="$2"; shift 2 ;;
+    --approval-required-tools) APPROVAL_REQUIRED_TOOLS="$2"; shift 2 ;;
+    --lease-seconds) LEASE_SECONDS="$2"; shift 2 ;;
+    --enable-reasoning) ENABLE_REASONING="true"; shift ;;
+    --no-snapshot-history) SNAPSHOT_HISTORY="false"; shift ;;
+    --image-uri) IMAGE_URI_OVERRIDE="$2"; shift 2 ;;
     --fault-injection-delay-seconds) FAULT_INJECTION_DELAY_SECONDS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -72,8 +92,21 @@ if [[ ! "$SESSION_TTL_SECONDS" =~ ^[0-9]+$ ]] ||
   echo "--session-ttl-seconds must be an integer of at least 3600." >&2
   exit 2
 fi
-if [[ "$FAULT_INJECTION_MODE" != "delay" && "$FAULT_INJECTION_MODE" != "error" ]]; then
-  echo "--fault-injection-mode must be 'delay' or 'error'." >&2
+if [[ "$FAULT_INJECTION_MODE" != "delay" && "$FAULT_INJECTION_MODE" != "error" \
+  && "$FAULT_INJECTION_MODE" != "abort" && "$FAULT_INJECTION_MODE" != "crash" ]]; then
+  echo "--fault-injection-mode must be 'delay', 'error', 'abort', or 'crash'." >&2
+  exit 2
+fi
+if [[ ! "$LEASE_SECONDS" =~ ^[0-9]+$ || "$LEASE_SECONDS" -lt 30 ]]; then
+  echo "--lease-seconds must be an integer of at least 30." >&2
+  exit 2
+fi
+if [[ ! "$FAULT_INJECTION_TOOL" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "--fault-injection-tool must be a tool name (letters, digits, underscores)." >&2
+  exit 2
+fi
+if [[ ! "$APPROVAL_REQUIRED_TOOLS" =~ ^[A-Za-z0-9_,]*$ ]]; then
+  echo "--approval-required-tools must be a comma-separated list of tool names." >&2
   exit 2
 fi
 if [[ ! "$FAULT_INJECTION_DELAY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -106,6 +139,10 @@ ssm_parameter() {
 
 if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
   PUBLIC_IP="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+  if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]]; then
+    echo "Could not detect an IPv4 address (got: $PUBLIC_IP). Pass --service-access-cidr." >&2
+    exit 1
+  fi
   SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
 fi
 
@@ -127,14 +164,21 @@ if [[ -z "$KNOWLEDGE_BASE_ID" ]]; then
   exit 1
 fi
 
-MEMORY_STATUS="$(aws_cli dynamodb describe-table \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query 'Table.TableStatus' \
-  --output text)"
-MEMORY_INDEX_STATUS="$(aws_cli dynamodb describe-table \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query "Table.VectorIndexes[?IndexName=='${MEMORY_VECTOR_INDEX_NAME}'].IndexStatus | [0]" \
-  --output text)"
+# boto3 (pinned in uv.lock) instead of the AWS CLI: older CLI v2 releases omit VectorIndexes.
+MEMORY_CHECK_OPTIONS=(
+  --table-name "$MEMORY_TABLE_NAME"
+  --vector-index-name "$MEMORY_VECTOR_INDEX_NAME"
+  --region "$REGION"
+)
+if [[ -n "$PROFILE" ]]; then
+  MEMORY_CHECK_OPTIONS+=(--profile "$PROFILE")
+fi
+MEMORY_CHECK_OUTPUT="$(uv run --project "$MODULE_DIR" --frozen python \
+  "$MODULE_DIR/scripts/check_memory_ready.py" "${MEMORY_CHECK_OPTIONS[@]}")" || {
+  echo "Could not read the memory table $MEMORY_TABLE_NAME." >&2
+  exit 1
+}
+read -r MEMORY_STATUS MEMORY_INDEX_STATUS <<<"$MEMORY_CHECK_OUTPUT"
 if [[ "$MEMORY_STATUS" != "ACTIVE" || "$MEMORY_INDEX_STATUS" != "ACTIVE" ]]; then
   echo "Workshop Studio memory storage is not ready." >&2
   echo "  Table: $MEMORY_STATUS" >&2
@@ -178,6 +222,7 @@ if ! kubectl get secret langfuse-otel-auth \
   --namespace mortgage-assistant >/dev/null 2>&1; then
   echo "The Langfuse OTLP Secret from Lab 5 is missing." >&2
   echo "Complete the Lab 5 observability deployment before running Lab 6." >&2
+  echo "(Lab 6 cleanup deletes the mortgage-assistant namespace, including this Secret.)" >&2
   exit 1
 fi
 
@@ -197,24 +242,29 @@ IMAGE_TAG="lab06-agent-$(date -u +%Y%m%d%H%M%S)"
 IMAGE_URI="${REPOSITORY_URI}:${IMAGE_TAG}"
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
-echo "Logging Docker into $REGISTRY"
-aws_cli ecr get-login-password |
-  docker login --username AWS --password-stdin "$REGISTRY"
-
-echo "Building $IMAGE_URI for EKS x86_64 nodes"
-if docker buildx version >/dev/null 2>&1; then
-  docker buildx build \
-    --platform linux/amd64 \
-    --tag "$IMAGE_URI" \
-    --load \
-    "$MODULE_DIR"
+if [[ -n "$IMAGE_URI_OVERRIDE" ]]; then
+  IMAGE_URI="$IMAGE_URI_OVERRIDE"
+  echo "Reusing image $IMAGE_URI (skipping build and push)"
 else
-  docker build \
-    --platform linux/amd64 \
-    --tag "$IMAGE_URI" \
-    "$MODULE_DIR"
+  echo "Logging Docker into $REGISTRY"
+  aws_cli ecr get-login-password |
+    docker login --username AWS --password-stdin "$REGISTRY"
+
+  echo "Building $IMAGE_URI for EKS x86_64 nodes"
+  if docker buildx version >/dev/null 2>&1; then
+    docker buildx build \
+      --platform linux/amd64 \
+      --tag "$IMAGE_URI" \
+      --load \
+      "$MODULE_DIR"
+  else
+    docker build \
+      --platform linux/amd64 \
+      --tag "$IMAGE_URI" \
+      "$MODULE_DIR"
+  fi
+  docker push "$IMAGE_URI"
 fi
-docker push "$IMAGE_URI"
 
 kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
 
@@ -251,7 +301,8 @@ for template_variable in \
   MEMORY_VECTOR_INDEX_NAME MEMORY_EMBEDDING_MODEL_ID SESSION_TTL_SECONDS \
   CREDIT_SCORE_MCP_URL LANGFUSE_OTLP_ENDPOINT TELEMETRY_MASK_CONTENT \
   FAULT_INJECTION_ENABLED FAULT_INJECTION_TOOL FAULT_INJECTION_MODE \
-  FAULT_INJECTION_DELAY_SECONDS SERVICE_ACCESS_CIDR; do
+  FAULT_INJECTION_DELAY_SECONDS SERVICE_ACCESS_CIDR APPROVAL_REQUIRED_TOOLS \
+  LEASE_SECONDS ENABLE_REASONING SNAPSHOT_HISTORY; do
   template_value="${!template_variable}"
   case "$template_value" in
     *'&'*|*'|'*|*'\'*|*$'\n'*|*$'\r'*)
@@ -277,6 +328,10 @@ sed \
   -e "s|__FAULT_INJECTION_TOOL__|$FAULT_INJECTION_TOOL|g" \
   -e "s|__FAULT_INJECTION_MODE__|$FAULT_INJECTION_MODE|g" \
   -e "s|__FAULT_INJECTION_DELAY_SECONDS__|$FAULT_INJECTION_DELAY_SECONDS|g" \
+  -e "s|__APPROVAL_REQUIRED_TOOLS__|$APPROVAL_REQUIRED_TOOLS|g" \
+  -e "s|__LEASE_SECONDS__|$LEASE_SECONDS|g" \
+  -e "s|__ENABLE_REASONING__|$ENABLE_REASONING|g" \
+  -e "s|__SNAPSHOT_HISTORY__|$SNAPSHOT_HISTORY|g" \
   -e "s|__SERVICE_ACCESS_CIDR__|$SERVICE_ACCESS_CIDR|g" \
   "$MODULE_DIR/k8s/service.template.yaml" > "$SERVICE_MANIFEST"
 
@@ -320,20 +375,24 @@ if [[ -z "$SERVICE_ENDPOINT" ]]; then
 fi
 
 echo "Waiting for the Lab 06 mortgage API readiness endpoint"
+# The NLB's DNS name and targets come up in stages, so require two successes in a row.
+READY_STREAK=0
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \
     --connect-timeout 5 \
     --max-time 10 \
-    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
-    break
+    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null 2>&1; then
+    READY_STREAK=$((READY_STREAK + 1))
+    if [[ "$READY_STREAK" -ge 2 ]]; then
+      break
+    fi
+  else
+    READY_STREAK=0
   fi
   sleep 10
 done
 
-if ! curl --fail --silent --show-error \
-  --connect-timeout 5 \
-  --max-time 10 \
-  "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
+if [[ "$READY_STREAK" -lt 2 ]]; then
   kubectl get pods --namespace mortgage-assistant --output wide
   kubectl logs \
     --namespace mortgage-assistant \
@@ -345,13 +404,14 @@ fi
 
 SMOKE_ACTOR="deployment-smoke-test"
 SMOKE_SESSION="session-$(date -u +%Y%m%d%H%M%S)"
+SMOKE_REQUEST="smoke-$(date -u +%Y%m%d%H%M%S)"
 PROMPT_JSON="$(python3 -c \
-  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3]}))' \
-  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION")"
+  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3], "request_id": sys.argv[4]}))' \
+  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION" "$SMOKE_REQUEST")"
 
 echo
-echo "Lab 06 credit-score integration smoke-test response:"
-SMOKE_RESPONSE="$(curl --fail --silent --show-error \
+echo "Lab 06 smoke-test response:"
+SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error \
   --max-time 300 \
   --request POST \
   "http://${SERVICE_ENDPOINT}/invoke" \
@@ -369,6 +429,45 @@ if [[ -z "$SMOKE_TRACE_ID" ]]; then
   exit 1
 fi
 
+echo
+echo "Verifying the audit trail and idempotent replay for request ${SMOKE_REQUEST}:"
+SMOKE_TRAIL="$(curl --fail-with-body --silent --show-error \
+  --max-time 60 \
+  --get "http://${SERVICE_ENDPOINT}/executions/${SMOKE_REQUEST}" \
+  --data-urlencode "actor_id=${SMOKE_ACTOR}" \
+  --data-urlencode "session_id=${SMOKE_SESSION}" \
+  --header "Authorization: Bearer ${API_KEY}")"
+SMOKE_REPLAY="$(curl --fail-with-body --silent --show-error \
+  --max-time 60 \
+  --request POST \
+  "http://${SERVICE_ENDPOINT}/invoke" \
+  --header "Authorization: Bearer ${API_KEY}" \
+  --header "Content-Type: application/json" \
+  --data "$PROMPT_JSON")"
+python3 - "$SMOKE_TRAIL" "$SMOKE_RESPONSE" "$SMOKE_REPLAY" <<'PYEOF'
+import json
+import sys
+
+trail, first, replay = (json.loads(value) for value in sys.argv[1:4])
+problems = []
+if not trail.get("chain_valid"):
+    problems.append("audit hash chain is not valid")
+if trail["execution"]["status"] != "COMPLETED":
+    problems.append(f"execution status is {trail['execution']['status']}")
+if not trail.get("records"):
+    problems.append("audit trail is empty")
+if replay.get("response") != first.get("response"):
+    problems.append("replaying the request_id did not return the stored response")
+if replay.get("attempt") != first.get("attempt"):
+    problems.append("replaying the request_id started a new attempt")
+if problems:
+    sys.exit("Lab 6 smoke verification failed: " + "; ".join(problems))
+print(
+    f"  audit records: {len(trail['records'])}, chain valid, "
+    f"route: {[step['agent'] for step in trail['explanation']['route']] or 'none'}"
+)
+PYEOF
+
 cat <<EOF
 
 
@@ -381,13 +480,16 @@ Lab 06 completed.
   Credit-score MCP Service: credit-score-mcp in namespace credit-services, port 8081
   Langfuse UI: $LANGFUSE_URL
   Smoke-test trace ID: $SMOKE_TRACE_ID
+  Smoke-test request ID: $SMOKE_REQUEST (session $SMOKE_SESSION)
 
 The credit-score MCP server resources in credit-services were verified but not modified.
 The existing mortgage-assistant API key and Langfuse OTLP Secret were reused
 and were not printed.
 
-Invoke the integrated agent:
-  cd 06-mcp-credit-score
+Try it (from 06-mcp-credit-score):
   uv run app/invoke_eks.py --region $REGION --prompt \\
-    "Get the credit score for synthetic customer ID workshop-customer-12345."
+    "What is the balance on customer ID 123456's mortgage?"
+  uv run app/invoke_eks.py --region $REGION --trail last
+
+To change settings without rebuilding, rerun with: --image-uri $IMAGE_URI
 EOF

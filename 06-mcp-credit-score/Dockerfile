@@ -10,7 +10,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-COPY app/credit_score_mcp.py app/memory.py app/mortgage_agent.py app/mortgage_api.py app/telemetry.py ./
+COPY app/approvals.py app/audit.py app/credit_score_mcp.py app/execution.py \
+     app/ledger.py app/memory.py app/mortgage_agent.py app/mortgage_api.py \
+     app/resilience.py app/service.py app/store.py app/telemetry.py ./
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
@@ -23,4 +25,4 @@ USER 10001:10001
 EXPOSE 8080
 
 ENTRYPOINT ["uvicorn", "mortgage_api:app"]
-CMD ["--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "4"]
+CMD ["--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "32", "--timeout-graceful-shutdown", "300"]

@@ -1,6 +1,6 @@
 # Build and deploy Strands agents to Amazon EKS
 
-This repository contains complete participant checkpoints for building a Strands mortgage assistant, deploying it to Amazon EKS, adding DynamoDB-backed memory, instrumenting it with OpenTelemetry traces exported to self-hosted Langfuse, and integrating a tool from a pre-provisioned credit-score MCP server managed by the credit-services team.
+This repository contains complete participant checkpoints for building a Strands mortgage assistant, deploying it to Amazon EKS, adding DynamoDB-backed memory with agents-as-tools orchestration, a tamper-evident audit trail, and resumable execution, instrumenting it with OpenTelemetry traces exported to self-hosted Langfuse, and integrating a tool from a pre-provisioned credit-score MCP server managed by the credit-services team.
 
 Workshop Studio deploys `credit-services` and provisions the shared AWS environment and self-hosted Langfuse infrastructure before participants begin. The standalone `00-workshop-setup` module can provision the shared Bedrock, EKS, ECR, load-balancing, and memory resources, but it does not provision the Lab 5 Langfuse stack or Lab 6 credit-score MCP server.
 
@@ -12,10 +12,9 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | 1 | `01-test-knowledge-base` and Lab 6 explorer | Query the Knowledge Base, inspect EKS, and independently initialize/list/call the installed MCP server. |
 | 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally. |
 | 3 | `03-eks-service` | Deploy the assistant as a persistent two-replica FastAPI service on EKS. |
-| 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB. |
+| 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB, turn the specialists into persistent agents-as-tools, and add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
 | 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
 | 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
-| 7 | `07-audit-resume` | Turn the specialists into persistent agents-as-tools, then add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
 
@@ -25,13 +24,15 @@ Lab 3 creates the `mortgage-assistant` application namespace, a two-replica Depl
 
 Lab 4 updates those resources in place and adds:
 
-- Strands `SnapshotSessionManager` for short-term conversation state.
-- Strands `MemoryManager` for actor-scoped durable mortgage preferences.
+- Strands `SnapshotSessionManager` for short-term conversation state, one session per agent, saved after every message.
+- Strands `MemoryManager` for actor-scoped durable mortgage preferences, with provenance on every write.
 - DynamoDB session, memory, and vector-search storage.
+- Specialists as persistent agents-as-tools (`Agent.as_tool`) that return structured reports to the supervisor.
+- A hash-chained audit trail of invocations, model decisions, tool calls, memory reads and writes, and approvals, plus an `explanation` block on every response.
+- Resumable execution: request-level idempotency, a per-session lease with heartbeat, a tool ledger for exactly-once effects, rollback of unfinished turns, and Strands interrupts that pause side-effecting tool calls for human approval and survive pod restarts.
 - A stateful participant client and deterministic hydration utilities.
 
-Lab 5 updates the memory-enabled service with OpenTelemetry/Langfuse tracing,
-request correlation, content masking, and controlled fault injection.
+Lab 5 updates the service with OpenTelemetry/Langfuse tracing, request correlation (trace IDs are recorded on the audit trail and returned by the API), content masking, and controlled fault injection.
 
 Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MCP server independently, then the application adds:
 
@@ -43,12 +44,6 @@ Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MC
 
 Every `/invoke` initializes and discovers MCP before the supervisor chooses a route. MCP server failure therefore affects all invocation routes. For MCP, `GET /health/ready` checks the fixed configured URL identity without connecting to the server; it also resolves the Knowledge Base ID. The explorer `verify` operation performs the live protocol and tool-contract check.
 
-Lab 7 is a complete checkpoint of Lab 6 that refactors the multi-agent design around Strands agents-as-tools. Each specialist becomes an `Agent` exposed with `Agent.as_tool(preserve_context=True)` with its own durable session, and the application adds:
-
-- A durable audit trail of invocations, model decisions, tool calls, memory reads and writes, and approvals for every agent, stored in the existing DynamoDB table with a hash chain.
-- Structured specialist reports, routing rationale, and an `explanation` block on each response.
-- Message-level snapshots, a per-session lease, request-level idempotency, a tool ledger, and rollback of unfinished turns so a failed request resumes with the same `request_id`.
-- Strands interrupts that pause side-effecting tool calls for human approval and survive pod restarts.
 
 ## MCP Server Ownership
 
@@ -107,16 +102,17 @@ uv run app/invoke_eks.py \
 
 The script discovers provisioned resources, builds and pushes a `linux/amd64` image, applies `mortgage-assistant` Kubernetes resources, waits for two ready replicas and the NLB, and runs a smoke request.
 
-## Lab 4: Add Memory
+## Lab 4: Add Memory, Agent Orchestration, and Resumable Execution
 
 ```bash
 cd ../04-memory
 uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-memory.sh --region us-west-2
-uv run app/invoke_eks.py --region us-west-2 --show-context
+uv run app/invoke_eks.py --region us-west-2 --prompt "What is the balance on customer ID 123456's mortgage?"
+uv run app/invoke_eks.py --region us-west-2 --trail last
 ```
 
-See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, and cleanup exercises.
+See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, audit and explanation, failed-request resume, approval, and cleanup exercises.
 
 ## Lab 5: Add OpenTelemetry and Langfuse Observability
 
@@ -162,19 +158,6 @@ The deployment preserves the existing `mortgage-assistant` NLB, Service, service
 
 See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and `mortgage-assistant`-only cleanup exercises.
 
-## Lab 7: Audit, Explain, and Resume Agent Executions
-
-Lab 7 requires Labs 0, 5, and 6 in a Workshop Studio environment. Do not run the Lab 6 cleanup first: it deletes the Langfuse Secret that Lab 7 reuses.
-
-```bash
-cd ../07-audit-resume   # from the repository root: cd 07-audit-resume
-uv run python -m unittest discover --start-directory tests --verbose
-./scripts/deploy-audit-resume.sh --region us-west-2
-uv run app/invoke_eks.py --region us-west-2 --prompt "What is the balance on customer ID 123456's mortgage?"
-uv run app/invoke_eks.py --region us-west-2 --trail last
-```
-
-The deployment updates only the `mortgage-assistant` application and needs no new infrastructure or IAM permissions: audit, execution, lease, and ledger items use the existing memory table. See [`07-audit-resume/README.md`](07-audit-resume/README.md) for the design, API, SDK limits, and the resume and approval exercises.
 
 ## Standalone Setup Limitation
 
@@ -185,12 +168,12 @@ To provision only the shared base resources outside Workshop Studio:
 ```
 
 This is sufficient for Labs 1 through 4. It is not sufficient for Lab 5 or
-Lab 6 (and therefore Lab 7) because it does not provision the self-hosted Langfuse stack or the
+Lab 6 because it does not provision the self-hosted Langfuse stack or the
 credit-score MCP server. Do not substitute another MCP URL or deploy an ad
 hoc MCP server; use a Workshop Studio-provisioned environment for those labs.
 
 ## Cleanup
 
-Each deployment module documents its own cleanup scope. Lab 6 and Lab 7 cleanup delete only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
+Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
 
 Shared infrastructure cleanup is destructive and charge-impacting. Run it only in a standalone environment you intentionally provisioned and only after confirming the AWS account and Region.

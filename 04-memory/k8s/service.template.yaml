@@ -24,7 +24,7 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         workload: mortgage-assistant
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 330
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -46,17 +46,33 @@ spec:
             - name: AWS_DEFAULT_REGION
               value: __AWS_REGION__
             - name: MODEL_ID
-              value: __MODEL_ID__
+              value: "__MODEL_ID__"
             - name: KB_PARAMETER_NAME
-              value: __KB_PARAMETER_NAME__
+              value: "__KB_PARAMETER_NAME__"
             - name: MEMORY_TABLE_NAME
-              value: __MEMORY_TABLE_NAME__
+              value: "__MEMORY_TABLE_NAME__"
             - name: MEMORY_VECTOR_INDEX_NAME
-              value: __MEMORY_VECTOR_INDEX_NAME__
+              value: "__MEMORY_VECTOR_INDEX_NAME__"
             - name: MEMORY_EMBEDDING_MODEL_ID
-              value: __MEMORY_EMBEDDING_MODEL_ID__
+              value: "__MEMORY_EMBEDDING_MODEL_ID__"
             - name: MEMORY_SESSION_TTL_SECONDS
               value: "__MEMORY_SESSION_TTL_SECONDS__"
+            - name: FAULT_INJECTION_ENABLED
+              value: "__FAULT_INJECTION_ENABLED__"
+            - name: FAULT_INJECTION_TOOL
+              value: "__FAULT_INJECTION_TOOL__"
+            - name: FAULT_INJECTION_MODE
+              value: "__FAULT_INJECTION_MODE__"
+            - name: FAULT_INJECTION_DELAY_SECONDS
+              value: "__FAULT_INJECTION_DELAY_SECONDS__"
+            - name: APPROVAL_REQUIRED_TOOLS
+              value: "__APPROVAL_REQUIRED_TOOLS__"
+            - name: LEASE_SECONDS
+              value: "__LEASE_SECONDS__"
+            - name: ENABLE_REASONING
+              value: "__ENABLE_REASONING__"
+            - name: SNAPSHOT_HISTORY
+              value: "__SNAPSHOT_HISTORY__"
             - name: MORTGAGE_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -64,6 +80,13 @@ spec:
                   key: api-key
             - name: HOME
               value: /tmp
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
           readinessProbe:
             httpGet:
               path: /health/ready
@@ -76,10 +99,10 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 0
             periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             requests:
               cpu: 250m
