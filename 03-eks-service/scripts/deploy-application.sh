@@ -8,7 +8,7 @@ SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
 CLUSTER_NAME_PARAMETER="${CLUSTER_NAME_PARAMETER:-/workshop/mortgage-assistant/eks/cluster-name}"
 REPOSITORY_URI_PARAMETER="${REPOSITORY_URI_PARAMETER:-/workshop/mortgage-assistant/ecr/repository-uri}"
-MODEL_ID="${MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
+MODEL_ID="us.anthropic.claude-sonnet-4-6"
 KB_PARAMETER_NAME="${KB_PARAMETER_NAME:-/workshop/mortgage-assistant/bedrock/knowledge-base-id}"
 
 usage() {
@@ -20,12 +20,13 @@ Options:
   --profile PROFILE           AWS CLI profile; omit to use the default profile.
   --service-access-cidr CIDR  CIDR allowed to invoke the API (default: detected-ip/32).
   --prompt TEXT               Prompt used for the deployment smoke test.
+  --model-id MODEL_ID         Bedrock model or inference profile ID
+                              (default: us.anthropic.claude-sonnet-4-6).
   -h, --help                  Show this help.
 
 Environment variables:
   CLUSTER_NAME_PARAMETER      SSM parameter containing the EKS cluster name.
   REPOSITORY_URI_PARAMETER    SSM parameter containing the ECR repository URI.
-  MODEL_ID                    Bedrock model ID used by the application.
   KB_PARAMETER_NAME           SSM parameter containing the Knowledge Base ID.
 EOF
 }
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --profile) PROFILE="$2"; shift 2 ;;
     --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
+    --model-id) MODEL_ID="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -83,6 +85,10 @@ REPOSITORY_URI="$(read_ssm_parameter "$REPOSITORY_URI_PARAMETER")"
 if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
   PUBLIC_IP="$(curl --fail --silent --show-error \
     https://checkip.amazonaws.com | tr -d '[:space:]')"
+  if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]]; then
+    echo "Could not detect an IPv4 address (got: $PUBLIC_IP). Pass --service-access-cidr." >&2
+    exit 1
+  fi
   SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
 fi
 
@@ -132,7 +138,25 @@ docker push "$IMAGE_URI"
 
 kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
 
-API_KEY="${MORTGAGE_API_KEY:-$(openssl rand -hex 32)}"
+# Reuse the existing key so reruns do not invalidate it mid-rollout.
+if [[ -n "${MORTGAGE_API_KEY:-}" ]]; then
+  API_KEY="$MORTGAGE_API_KEY"
+elif kubectl get secret mortgage-assistant-api-key \
+  --namespace mortgage-assistant >/dev/null 2>&1; then
+  API_KEY="$(
+    kubectl get secret mortgage-assistant-api-key \
+      --namespace mortgage-assistant \
+      --output jsonpath='{.data.api-key}' |
+      base64 --decode
+  )"
+else
+  API_KEY="$(openssl rand -hex 32)"
+fi
+if [[ -z "${API_KEY//[[:space:]]/}" ]]; then
+  echo "The mortgage-assistant API key must not be empty." >&2
+  exit 1
+fi
+
 kubectl create secret generic mortgage-assistant-api-key \
   --namespace mortgage-assistant \
   --from-literal="api-key=$API_KEY" \
@@ -143,6 +167,17 @@ kubectl create secret generic mortgage-assistant-api-key \
 SERVICE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mortgage-service.XXXXXX.yaml")"
 trap 'rm -f "$SERVICE_MANIFEST"' EXIT
 
+for template_variable in \
+  IMAGE_URI REGION MODEL_ID KB_PARAMETER_NAME SERVICE_ACCESS_CIDR; do
+  template_value="${!template_variable}"
+  case "$template_value" in
+    *'&'*|*'|'*|*'\'*|*$'\n'*|*$'\r'*)
+      echo "$template_variable contains a value that cannot be rendered safely." >&2
+      exit 1
+      ;;
+  esac
+done
+
 sed \
   -e "s|__IMAGE_URI__|$IMAGE_URI|g" \
   -e "s|__AWS_REGION__|$REGION|g" \
@@ -150,6 +185,11 @@ sed \
   -e "s|__KB_PARAMETER_NAME__|$KB_PARAMETER_NAME|g" \
   -e "s|__SERVICE_ACCESS_CIDR__|$SERVICE_ACCESS_CIDR|g" \
   "$MODULE_DIR/k8s/service.template.yaml" > "$SERVICE_MANIFEST"
+
+if grep -Eq '__[A-Z0-9_]+__' "$SERVICE_MANIFEST"; then
+  echo "Rendered Lab 03 manifest contains unresolved template placeholders." >&2
+  exit 1
+fi
 
 kubectl apply -f "$SERVICE_MANIFEST"
 
@@ -185,27 +225,31 @@ if [[ -z "$SERVICE_ENDPOINT" ]]; then
   exit 1
 fi
 
-echo "Waiting for the mortgage API health endpoint"
+echo "Waiting for the mortgage API readiness endpoint"
+# The NLB's DNS name and targets come up in stages, so require two successes in a row.
+READY_STREAK=0
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \
     --connect-timeout 5 \
     --max-time 10 \
-    "http://${SERVICE_ENDPOINT}/health" >/dev/null; then
-    break
+    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null 2>&1; then
+    READY_STREAK=$((READY_STREAK + 1))
+    if [[ "$READY_STREAK" -ge 2 ]]; then
+      break
+    fi
+  else
+    READY_STREAK=0
   fi
   sleep 10
 done
 
-if ! curl --fail --silent --show-error \
-  --connect-timeout 5 \
-  --max-time 10 \
-  "http://${SERVICE_ENDPOINT}/health" >/dev/null; then
+if [[ "$READY_STREAK" -lt 2 ]]; then
   kubectl get pods --namespace mortgage-assistant --output wide
   kubectl logs \
     --namespace mortgage-assistant \
     deployment/mortgage-assistant \
     --tail=200 || true
-  echo "Mortgage API did not become healthy." >&2
+  echo "Mortgage API did not become ready." >&2
   exit 1
 fi
 
@@ -230,7 +274,9 @@ Lab 03 completed.
   EKS cluster: $CLUSTER_NAME
   Image: $IMAGE_URI
   API endpoint: http://${SERVICE_ENDPOINT}
-  API key: $API_KEY
+
+The API key is stored in the mortgage-assistant-api-key Secret and was not
+printed. invoke_eks.py reads it automatically.
 
 Send another prompt without rebuilding:
   cd 03-eks-service

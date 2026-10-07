@@ -24,7 +24,7 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         workload: mortgage-assistant
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 330
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -56,6 +56,13 @@ spec:
                   key: api-key
             - name: HOME
               value: /tmp
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
           readinessProbe:
             httpGet:
               path: /health/ready
@@ -68,10 +75,16 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 0
             periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            # Keep serving while the NLB deregisters this pod, then let
+            # Uvicorn drain in-flight requests (--timeout-graceful-shutdown 300).
+            preStop:
+              sleep:
+                seconds: 15
           resources:
             requests:
               cpu: 250m
