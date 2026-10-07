@@ -24,7 +24,6 @@ Parameters:
     Type: String
     Default: "1.36"
     AllowedValues:
-      - "1.34"
       - "1.35"
       - "1.36"
   NodeInstanceType:

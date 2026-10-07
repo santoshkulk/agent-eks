@@ -24,7 +24,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
-API_KEY = os.environ.get("MORTGAGE_API_KEY", "")
+API_KEY = os.environ.get("MORTGAGE_API_KEY", "").strip()
+if not API_KEY:
+    raise RuntimeError("MORTGAGE_API_KEY is required and must not be empty")
 
 
 class InvokeRequest(BaseModel):
@@ -38,9 +40,6 @@ class InvokeResponse(BaseModel):
 
 
 def authorize(authorization: str | None) -> None:
-    if not API_KEY:
-        return
-
     expected = f"Bearer {API_KEY}"
     if not authorization or not hmac.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")

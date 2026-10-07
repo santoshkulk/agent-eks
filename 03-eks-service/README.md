@@ -257,6 +257,19 @@ Kubernetes can start a replacement pod before terminating an old pod. A
 PodDisruptionBudget requests that at least one replica remain available during
 voluntary disruptions.
 
+Two further controls keep requests flowing while pods are replaced:
+
+- **Pod readiness gates.** The namespace carries the label
+  `elbv2.k8s.aws/pod-readiness-gate-inject: enabled`. AWS Load Balancer
+  Controller then adds a readiness gate to each new pod, and the rollout does
+  not continue until the Network Load Balancer reports that pod's target as
+  healthy. Without it, Kubernetes could remove an old pod while the new one is
+  still being registered with the load balancer.
+- **Graceful shutdown.** When a pod is terminated, a 15-second `preStop` sleep
+  keeps it serving while the load balancer deregisters it. Uvicorn then stops
+  accepting new connections and waits up to 300 seconds for in-flight agent
+  requests to finish. `terminationGracePeriodSeconds: 330` covers both.
+
 ### Kubernetes Service and Network Load Balancer
 
 The Kubernetes Service has type `LoadBalancer`. AWS Load Balancer Controller
@@ -277,8 +290,14 @@ The API exposes two unauthenticated operational endpoints:
 - `GET /health/ready` confirms that the application can read the Knowledge
   Base configuration from SSM.
 
-Kubernetes uses `/health` for the liveness probe and `/health/ready` for the
-readiness probe. The Network Load Balancer also uses `/health`.
+Kubernetes uses `/health` for the startup and liveness probes and
+`/health/ready` for the readiness probe. The Network Load Balancer also uses
+`/health`.
+
+The liveness probe tolerates two minutes of failures. When a pod reaches its
+concurrency limit, Uvicorn answers every new request, including probes, with
+`503`; a strict liveness probe would restart a pod that is merely busy and
+cancel the requests it is processing.
 
 The endpoints remain unauthenticated so Kubernetes and the load balancer can
 call them without the participant API key.
@@ -335,9 +354,10 @@ The `Dockerfile`:
 4. Creates a non-root user with UID `10001`.
 5. Starts Uvicorn on port `8080`.
 
-The container runs with one Uvicorn worker and a concurrency limit of four
-requests per pod. Kubernetes provides horizontal process isolation by running
-two pods.
+The container runs with one Uvicorn worker and a concurrency limit of 32
+connections per pod; requests beyond the limit receive `503`. On shutdown,
+Uvicorn waits up to 300 seconds for in-flight requests. Kubernetes provides
+horizontal process isolation by running two pods.
 
 ### Kubernetes security configuration
 
@@ -375,10 +395,10 @@ the application to:
 
 1. Reads the EKS cluster name from `/workshop/mortgage-assistant/eks/cluster-name` and the ECR
    repository URI from `/workshop/mortgage-assistant/ecr/repository-uri` in SSM Parameter Store.
-2. Defaults `MODEL_ID` to `us.anthropic.claude-sonnet-4-6` and
-   `KB_PARAMETER_NAME` to
-   `/workshop/mortgage-assistant/bedrock/knowledge-base-id` unless you override
-   those environment variables.
+2. Uses the `us.anthropic.claude-sonnet-4-6` model unless you pass
+   `--model-id`, and reads the Knowledge Base ID parameter name from
+   `/workshop/mortgage-assistant/bedrock/knowledge-base-id` unless you set
+   `KB_PARAMETER_NAME`.
 3. Detects or accepts the allowed source CIDR.
 4. Configures the local `kubectl` context.
 5. Confirms that AWS Load Balancer Controller is ready.
@@ -386,10 +406,13 @@ the application to:
 7. Builds a `linux/amd64` image with an immutable timestamped tag.
 8. Pushes the image to the existing ECR repository.
 9. Creates or updates the Kubernetes namespace and service account.
-10. Creates the API-key Kubernetes Secret.
-11. Renders and applies the Deployment, PodDisruptionBudget, and Service.
+10. Creates the API-key Kubernetes Secret, or reuses the existing key on
+    later runs.
+11. Validates the template values, then renders and applies the Deployment,
+    PodDisruptionBudget, and Service.
 12. Waits for the Deployment rollout and Network Load Balancer.
-13. Checks API health and sends one smoke-test prompt.
+13. Checks API readiness through the load balancer and sends one smoke-test
+    prompt.
 
 ### Invocation client
 
@@ -411,8 +434,11 @@ The workshop API uses two controls:
    CIDR.
 2. `POST /invoke` requires a bearer token stored in a Kubernetes Secret.
 
-The API key is compared using a constant-time comparison. The deployment
-script generates a random key unless `MORTGAGE_API_KEY` is already set.
+The API key is compared using a constant-time comparison. The application
+refuses to start without a non-empty `MORTGAGE_API_KEY`, so authentication
+cannot be disabled by accident. On the first deployment the script generates
+a random key; later deployments reuse the key already stored in the Secret
+unless `MORTGAGE_API_KEY` is set.
 
 This is appropriate for a self-contained workshop account, but it is not a
 complete production identity system. A production API should authenticate
@@ -499,7 +525,8 @@ You also need:
 - `curl`.
 - `openssl`.
 - Access to the Bedrock model configured by the Workshop Studio foundation
-  infrastructure.
+  infrastructure. Anthropic models on Bedrock also require the account's
+  one-time Anthropic use-case submission.
 
 The scripts use the default AWS CLI profile unless `--profile` is provided.
 Workshop Studio has already provisioned the required AWS infrastructure. The
@@ -518,7 +545,11 @@ parameters and does not require a CloudFormation stack name or outputs.
 │   ├── base.yaml
 │   └── service.template.yaml
 ├── scripts/
+│   ├── cleanup-application.sh
 │   └── deploy-application.sh
+├── tests/
+│   ├── test_api_contract.py
+│   └── test_manifest_and_dependencies.py
 ├── .dockerignore
 ├── Dockerfile
 ├── pyproject.toml
@@ -537,8 +568,17 @@ cd 03-eks-service
 ```
 
 The first `uv run` command creates the lab-local Python environment and
-installs its locked dependencies automatically. Test the agent as a standalone
-Python process before starting FastAPI:
+installs its locked dependencies automatically. Run the unit tests, which need
+no AWS access:
+
+```bash
+uv run python -m unittest discover --start-directory tests --verbose
+```
+
+The application reads `MODEL_ID` from the environment. If your shell already
+exports `MODEL_ID` for another tool, run `unset MODEL_ID` first.
+
+Test the agent as a standalone Python process before starting FastAPI:
 
 ```bash
 uv run app/mortgage_agent.py \
@@ -665,7 +705,9 @@ To provide the CIDR explicitly:
 Replace the example address with the public IP that should be allowed. Avoid
 `0.0.0.0/0` unless unrestricted public network access is intentional.
 
-To use a stable API key across deployments:
+The first deployment generates a random API key and stores it in the
+`mortgage-assistant-api-key` Secret. Later deployments reuse that key. To
+choose or rotate the key, set it before deploying:
 
 ```bash
 export MORTGAGE_API_KEY="$(openssl rand -hex 32)"
@@ -681,10 +723,11 @@ At completion, the script prints:
 - The EKS cluster name.
 - The immutable image URI.
 - The API endpoint.
-- The API key.
 - One smoke-test response.
 
-Do not commit the printed API key or share it outside the workshop account.
+The API key is not printed. The Python client reads it from the Secret, and
+Step 9 shows how to read it for `curl`. Do not commit the key or share it
+outside the workshop account.
 
 ## Step 5: Review what the deployment script created
 
@@ -964,6 +1007,18 @@ kubectl delete pod "$POD_NAME" \
   --namespace mortgage-assistant
 ```
 
+To see that in-flight work survives, first start a longer request in a
+second terminal, then delete the pod while it is running:
+
+```bash
+uv run app/invoke_eks.py \
+  --prompt "Compare 15-year and 30-year mortgages in detail."
+```
+
+The deleted pod keeps serving for 15 seconds while the load balancer
+deregisters it, then finishes in-flight requests before exiting, so the
+request completes normally.
+
 The Deployment immediately creates a replacement. Wait for two ready replicas:
 
 ```bash
@@ -1029,6 +1084,20 @@ Expected result:
 - Kubernetes replaced the pods with a rolling update.
 - Two replicas are ready after the rollout.
 - The EKS cluster and node group were not recreated.
+- The API key is unchanged, so the client keeps working during the rollout.
+
+Confirm that the new pods carry the load balancer readiness gate:
+
+```bash
+kubectl get pods \
+  --namespace mortgage-assistant \
+  --selector app.kubernetes.io/name=mortgage-assistant \
+  --output jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.readinessGates[*].conditionType}{"\n"}{end}'
+```
+
+Each pod lists a `target-health.elbv2.k8s.aws/...` condition. Pods from the
+very first deployment may not, because the gate is injected only when the
+load balancer target group already exists at pod creation.
 
 ## API contract
 
@@ -1067,6 +1136,7 @@ The prompt must contain between 1 and 4,000 characters.
 | `401` | The bearer token is missing or invalid. |
 | `422` | FastAPI rejected an invalid request body, such as an empty prompt. |
 | `500` | The agent invocation failed; the response includes a request ID. |
+| `503` | The pod is at its concurrency limit of 32 requests; retry later. |
 
 ### Operational endpoints
 
@@ -1139,7 +1209,10 @@ kubectl logs \
   --tail=200
 ```
 
-Workshop Studio permission setup installs the controller.
+Workshop Studio, or `00-workshop-setup` in a standalone environment,
+installs the controller. Because the namespace enables pod readiness gates,
+pods in `mortgage-assistant` cannot be created while the controller's webhook
+is unavailable; events then mention `mpod.elbv2.k8s.aws`.
 
 ### Docker cannot build the image
 
@@ -1278,9 +1351,11 @@ export MORTGAGE_API_KEY="$(
 )"
 ```
 
-The deployment script generates a new key on each run unless
-`MORTGAGE_API_KEY` is exported before deployment. The Python client normally
-discovers the current key automatically.
+The deployment script keeps the existing key unless `MORTGAGE_API_KEY` is
+exported before deployment, in which case that value replaces it. A
+`MORTGAGE_API_KEY` exported in your shell for an older key also overrides the
+Secret in `invoke_eks.py`; run `unset MORTGAGE_API_KEY` to use the current
+key. The Python client otherwise discovers the key automatically.
 
 ### The application receives AccessDenied from AWS
 
@@ -1387,7 +1462,7 @@ future authorization, telemetry, rate limiting, and policy controls.
 | No rate limiting or admission control | A client can exhaust pod concurrency or Bedrock quotas. | Add per-identity quotas, request-size limits, rate limiting, backpressure, and bounded queues. Coordinate limits with downstream AWS quotas. |
 | Fixed two replicas and no HPA | Capacity does not adjust to traffic, latency, or model-call concurrency. | Load test the complete path, configure a Horizontal Pod Autoscaler, validate cluster capacity, and use suitable metrics such as active requests and latency. |
 | Replicas are not explicitly spread | Both pods could be scheduled onto the same node or Availability Zone. | Add topology-spread constraints and pod anti-affinity, use multi-AZ node groups, and test node and AZ disruption. |
-| One Uvicorn worker and four concurrent requests per pod | The workshop setting may underutilize or overload resources under different model latency and memory profiles. | Benchmark CPU, memory, connection use, and downstream quotas; then tune workers, replicas, concurrency, timeouts, and resource limits together. |
+| One Uvicorn worker and 32 concurrent connections per pod | The workshop setting may underutilize or overload resources under different model latency and memory profiles. | Benchmark CPU, memory, connection use, and downstream quotas; then tune workers, replicas, concurrency, timeouts, and resource limits together. |
 | Synchronous request waits for the complete agent response | Long model or tool calls can exceed client, proxy, or load-balancer timeouts. | Add end-to-end timeout budgets and cancellation. Use streaming for interactive responses or an asynchronous job API for long-running workflows. |
 | No client idempotency key | Retried requests could repeat side-effecting tools added in a future implementation. | Require idempotency keys for mutating operations, persist results with TTL, and design tools to be idempotent. |
 | AWS calls rely mainly on SDK defaults | Throttling or transient errors may fail requests unpredictably. | Configure explicit connection and operation timeouts, bounded exponential backoff with jitter, retry budgets, and circuit breaking. Do not blindly retry side effects. |
@@ -1411,9 +1486,7 @@ If you do not intend to continue, you can remove only the Lab 03 application
 and its load balancer:
 
 ```bash
-kubectl delete namespace mortgage-assistant \
-  --wait=true \
-  --timeout=15m
+./scripts/cleanup-application.sh --region us-west-2
 ```
 
 Deleting the namespace removes the Deployment, pods, API-key Secret,
@@ -1429,6 +1502,7 @@ its remaining resources when the environment is terminated.
 
 You have completed Lab 03 when:
 
+- The Lab 03 unit tests pass.
 - The standalone Strands agent works from the Lab 03 folder.
 - The FastAPI application runs locally.
 - The EKS Deployment reports two ready replicas.
