@@ -233,7 +233,14 @@ def load_records(
     store: ItemStore, actor_id: str, session_id: str, request_id: str
 ) -> list[dict[str, Any]]:
     items = store.query(f"user/{actor_id}", audit_prefix(session_id, request_id))
-    return [json.loads(str(item["record"])) for item in items]
+    records = []
+    for index, item in enumerate(items):
+        try:
+            records.append(json.loads(str(item["record"])))
+        except (ValueError, KeyError):
+            # Keep the position so verify_chain fails instead of the read raising.
+            records.append({"seq": None, "type": "corrupt", "agent_id": "?", "attempt": 0, "data": {"unreadable": True, "sk": item.get("sk")}})
+    return records
 
 
 _current_trail: contextvars.ContextVar[AuditTrail | None] = contextvars.ContextVar(
@@ -398,40 +405,50 @@ def specialist_evidence(result: Any) -> list[Any]:
 
 
 def build_explanation(records: list[dict[str, Any]], specialist_tools: set[str]) -> dict[str, Any]:
-    """Summarise why and how a request was answered from its audit records."""
+    """Summarise why and how a request was answered from its audit records.
+
+    Records can be unreadable or altered (that is what the hash chain is for), so a
+    malformed record is skipped and counted instead of failing the whole summary.
+    """
     rationale_by_tool_use: dict[str, str] = {}
+    malformed = 0
     for record in records:
-        if record["type"] == "decision" and not record["data"].get("truncated"):
-            for tool_use in record["data"].get("tool_uses", []):
-                rationale_by_tool_use[tool_use["toolUseId"]] = record["data"].get("text", "")
+        try:
+            if record["type"] == "decision" and not record["data"].get("truncated"):
+                for tool_use in record["data"].get("tool_uses", []):
+                    rationale_by_tool_use[tool_use["toolUseId"]] = record["data"].get("text", "")
+        except (KeyError, TypeError, AttributeError):
+            malformed += 1
     route, tools_used, memories, approvals, evidence = [], [], [], [], []
     for record in records:
-        data = record["data"]
-        if data.get("truncated"):
-            continue  # oversized record: only a digest and preview were kept
-        if record["type"] == "tool_call":
-            entry = {
-                "agent": record["agent_id"],
-                "tool": data["tool"],
-                "status": data["status"],
-                "attempt": record["attempt"],
-            }
-            tools_used.append(entry)
-            if data["tool"] in specialist_tools:
-                route.append(
-                    {
+        try:
+            data = record["data"]
+            if data.get("truncated"):
+                continue  # oversized record: only a digest and preview were kept
+            if record["type"] == "tool_call":
+                entry = {
+                    "agent": record["agent_id"],
+                    "tool": data["tool"],
+                    "status": data["status"],
+                    "attempt": record["attempt"],
+                }
+                if data["tool"] in specialist_tools:
+                    route_entry = {
                         "agent": data["tool"],
                         "reason": rationale_by_tool_use.get(data["toolUseId"], ""),
                         # False when the model delegated without writing a rationale first.
                         "rationale_recorded": bool(rationale_by_tool_use.get(data["toolUseId"])),
                         "status": data["status"],
                     }
-                )
-                evidence.extend(specialist_evidence(data.get("result")))
-        elif record["type"] == "memory_read":
-            memories.extend(data.get("results", []))
-        elif record["type"] == "approval":
-            approvals.append(data)
+                    route.append(route_entry)
+                    evidence.extend(specialist_evidence(data.get("result")))
+                tools_used.append(entry)
+            elif record["type"] == "memory_read":
+                memories.extend(data.get("results", []))
+            elif record["type"] == "approval":
+                approvals.append(data)
+        except (KeyError, TypeError, AttributeError):
+            malformed += 1
     return {
         "route": route,
         "tools_used": tools_used,
@@ -439,7 +456,11 @@ def build_explanation(records: list[dict[str, Any]], specialist_tools: set[str])
         "memories_used": memories,
         "approvals": approvals,
         "records": len(records),
-        "attempts": max((record["attempt"] for record in records), default=0),
+        "malformed_records": malformed,
+        "attempts": max(
+            (record.get("attempt", 0) for record in records if isinstance(record, dict)),
+            default=0,
+        ),
     }
 
 
