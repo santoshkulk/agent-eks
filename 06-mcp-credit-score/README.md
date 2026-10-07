@@ -23,6 +23,13 @@ What Lab 6 adds:
 - MCP readiness and failure behavior; and
 - two exercises that follow the credit-score call through the audit trail and behind an approval gate.
 
+## Estimated time
+
+Allow about 1 hour, including the optional approval-gating exercise: roughly 26
+minutes of reading, 12 of typing, 10 of waiting for the deployment and requests,
+and 5 in the Langfuse UI. A first image build with a cold cache adds about 10
+minutes.
+
 ## Architecture
 
 ```mermaid
@@ -416,7 +423,7 @@ uv run app/invoke_eks.py --region us-west-2 --prompt "What is a fixed-rate mortg
 uv run app/invoke_eks.py --region us-west-2 --trail last
 ```
 
-This trail shows a route to `general_mortgage_specialist` and no `get_credit_score` records, even though the MCP connection was still opened and validated for the request. You can also read the same trail directly from DynamoDB with `uv run app/inspect_audit.py --session-id SESSION_ID --request-id REQUEST_ID --records`, which uses your AWS identity instead of the API key.
+This trail shows a route to `general_mortgage_specialist` and no `get_credit_score` records, even though the MCP connection was still opened and validated for the request. You can also read the same trail directly from DynamoDB with `uv run app/inspect_audit.py --region us-west-2 --session-id SESSION_ID --request-id REQUEST_ID --records`, which uses your AWS identity instead of the API key.
 
 ## Exercise (optional): gate `get_credit_score` behind approval
 
@@ -449,8 +456,8 @@ uv run app/invoke_eks.py --region us-west-2 --approve last --reviewer YOUR_NAME
 
 What to observe:
 
-- while the request is paused, the audit trail has no completed `get_credit_score` `tool_call`. The approval hook runs before the audit hook, so the call is audited once, when it actually runs;
-- after `--approve`, the request completes and the trail gains an `approval` record naming the reviewer, followed by the `tool_call` for `get_credit_score`;
+- while the request is paused, the audit trail has a `tool_start` for `get_credit_score` (the audit hook still runs when the approval interrupt is raised) but no `tool_call`, so the call has not reached the MCP server. The only `tool_call` is written when the call actually runs;
+- after `--approve`, the request completes as attempt 2 and the trail gains an `approval` record naming the reviewer, a second `tool_start`, and the `tool_call` for `get_credit_score`;
 - after `--deny`, the trail records the denial and the tool call is cancelled with `Denied by reviewer ...`, so the MCP server is never called and the supervisor reports that the score was not retrieved; and
 - while a request awaits approval, new prompts in the same session are rejected with HTTP 409 until you approve, deny, or cancel it.
 
@@ -499,6 +506,13 @@ kubectl logs deployment/mortgage-assistant \
 kubectl logs deployment/credit-score-mcp \
   --namespace credit-services \
   --tail=100
+```
+
+`kubectl logs deployment/...` reads one pod (it prints `Found 2 pods, using pod/...`), and readiness probes fill most of the 100 lines. If you do not see your `POST /invoke` (or `POST /mcp`) line, read both replicas and filter out the probes:
+
+```bash
+kubectl logs --namespace mortgage-assistant \
+  --selector app.kubernetes.io/name=mortgage-assistant --prefix --tail=100 | grep -v "GET /health"
 ```
 
 The invocation client prints `Trace ID: ...` when tracing is configured. Open the Langfuse UI from `/workshop/mortgage-assistant/langfuse/url`, select **Tracing**, and locate that trace ID. Inspect the root request, supervisor, model, and tool spans and compare their durations with a general mortgage request. The same `trace_id` is stored on the execution and on every audit record (`--trail last --json`), so you can move between the audit trail and the trace.

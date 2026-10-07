@@ -72,8 +72,10 @@ After completing this lab, you will be able to:
 
 ## Estimated time
 
-Allow approximately 45–60 minutes, including deployment and the five
-observability exercises.
+Allow about 2 hours, including deployment and the five observability exercises:
+roughly 45 minutes of reading, 25 of typing, 15 of waiting for deployments and
+requests, and 40 of exploring traces in the Langfuse UI. A first image build with
+a cold cache adds about 10 minutes.
 
 ## Architecture
 
@@ -338,8 +340,13 @@ Ways to get from one to the other:
 - From a response: `invoke_eks.py` prints a `Trace ID:` line after the
   `Request ID:` line. Paste it into the Langfuse **Tracing** search.
 - From a trace to the audit trail: copy the `request_id` from the
-  `request:<request_id>` tag or span attribute, then run
-  `uv run app/invoke_eks.py --trail <request_id>`.
+  `request:<request_id>` tag or span attribute and the `session.id` span
+  attribute, then run
+  `uv run app/invoke_eks.py --trail <request_id> --session-id <session.id>`.
+  The trail is looked up within a session, so without `--session-id` the
+  command returns HTTP 404 for any request that is not in your client's
+  current session (for example one sent before `--new-session`). Passing
+  `--session-id` also makes that session the client's current session.
 - From the audit trail to a trace (including requests that failed and
   therefore returned no `trace_id`): run
   `uv run app/invoke_eks.py --trail last --json` and read `trace_id` on the
@@ -796,19 +803,38 @@ the label selector above fans out across both replicas so you can see which
 pod handled each request.)
 
 You can also list the session's requests from the audit side and match each
-`trace_id` to a trace in the Langfuse session:
+`trace_id` to a trace in the Langfuse session. This is a direct `curl` call,
+so first set the API key, the API URL (`http://` plus the Service's load
+balancer hostname), and the actor and session from `--show-context`, then
+call the API:
 
 ```bash
+export MORTGAGE_API_KEY="$(
+  kubectl get secret mortgage-assistant-api-key \
+    --namespace mortgage-assistant \
+    --output jsonpath='{.data.api-key}' |
+  base64 --decode
+)"
+
+export MORTGAGE_API_URL="http://$(
+  kubectl get service mortgage-assistant \
+    --namespace mortgage-assistant \
+    --output jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+)"
+
+CONTEXT="$(uv run app/invoke_eks.py --region us-west-2 --show-context)"
+ACTOR_ID="$(printf '%s\n' "$CONTEXT" | sed -n 's/^Actor: *//p')"
+SESSION_ID="$(printf '%s\n' "$CONTEXT" | sed -n 's/^Session: *//p')"
+
 curl --silent --get \
-  "$MORTGAGE_API_URL/sessions/<Session value>/executions" \
-  --data-urlencode "actor_id=<Actor value>" \
+  "$MORTGAGE_API_URL/sessions/$SESSION_ID/executions" \
+  --data-urlencode "actor_id=$ACTOR_ID" \
   --header "Authorization: Bearer $MORTGAGE_API_KEY"
 ```
 
-(See "The request receives HTTP 401" below for how to set
-`MORTGAGE_API_KEY`; set `MORTGAGE_API_URL` to `http://` plus the Service's
-load balancer hostname, from `kubectl get service mortgage-assistant
---namespace mortgage-assistant`.)
+The response lists each request in the session with its `status` and
+`trace_id`. Keep `MORTGAGE_API_URL` and `MORTGAGE_API_KEY` exported in this
+terminal; the "API contract" section below reuses them.
 
 ## Step 9 — Exercise 4: Controlled tool delay and failure
 
@@ -944,12 +970,16 @@ between the two modes: `error` is absorbed by the specialist's model,
 
 ### Reset
 
-Reset to the deterministic disabled state for the rest of the workshop:
+Reset to the deterministic disabled state for the rest of the workshop. This
+also puts the mode and delay back to the deployment script's defaults, so a
+later `FAULT_INJECTION_ENABLED=true` does not start in `abort` mode:
 
 ```bash
 kubectl set env deployment/mortgage-assistant \
   --namespace mortgage-assistant \
-  FAULT_INJECTION_ENABLED=false
+  FAULT_INJECTION_ENABLED=false \
+  FAULT_INJECTION_MODE=delay \
+  FAULT_INJECTION_DELAY_SECONDS=5
 
 kubectl rollout status deployment/mortgage-assistant \
   --namespace mortgage-assistant
@@ -1066,7 +1096,12 @@ grep -i -E 'otlp|telemetry'
 
 `telemetry.init_telemetry()` never raises; a misconfigured endpoint or
 missing/invalid OTLP headers is logged and tracing is silently disabled
-instead of crashing the pod. Confirm the `langfuse-otel-auth` Secret exists
+instead of crashing the pod. A healthy pod prints no OTLP line at the default
+log level (the `OTLP tracing configured` message is INFO), so the `grep`
+above normally shows only a `strands.telemetry` line. A configuration
+error is logged at ERROR level as `Failed to configure OTLP tracing`, and an
+empty `OTEL_EXPORTER_OTLP_ENDPOINT` (tracing disabled, no log line) shows up
+in the first command's output instead. Confirm the `langfuse-otel-auth` Secret exists
 and holds a non-empty `otlp-headers` key (the command masks the
 credential):
 
@@ -1087,22 +1122,28 @@ with an error if the smoke response has no `trace_id`.
 Spans are exported in batches, asynchronously, so allow a few seconds and
 refresh. If it still does not appear, confirm the Langfuse web Service is
 reachable from an EKS pod and that the credentials in the OTLP header are
-still valid for the current Langfuse project:
+still valid for the current Langfuse project. The `mortgage-assistant` namespace enforces the `restricted` Pod Security
+Standard, so the check pod needs a restricted-compliant security context
+(without it, `kubectl run` fails with `violates PodSecurity "restricted:latest"`):
 
 ```bash
+OTLP_ENDPOINT="$(aws ssm get-parameter \
+  --region us-west-2 \
+  --name /workshop/mortgage-assistant/langfuse/otlp-endpoint \
+  --query 'Parameter.Value' --output text)"
+
 kubectl run otlp-check --rm -it --restart=Never \
   --namespace mortgage-assistant \
-  --image=curlimages/curl -- \
-  curl -v "$(aws ssm get-parameter \
-    --region us-west-2 \
-    --name /workshop/mortgage-assistant/langfuse/otlp-endpoint \
-    --query 'Parameter.Value' --output text)"
+  --image=curlimages/curl \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"otlp-check","image":"curlimages/curl","args":["curl","-v","--max-time","10","'"$OTLP_ENDPOINT"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
 ```
 
 Any HTTP response here (even an error status, since the OTLP exporter sends
 `POST` requests and this check sends a `GET`) confirms the pod can reach the
 `langfuse-web` Service; the problem is then further up the stack, for
 example an incorrect or missing `OTEL_EXPORTER_OTLP_HEADERS` value. A
+"Could not resolve host" error means the endpoint's Service name does not exist
+(check the Parameter Store value). A
 connection timeout or "connection refused" instead points to the Langfuse
 pods themselves. Ask your facilitator to check that the `langfuse-web`
 Deployment in the `langfuse` namespace is ready (`kubectl get pods

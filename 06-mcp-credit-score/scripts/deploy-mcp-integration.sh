@@ -488,7 +488,7 @@ and were not printed.
 
 Try it (from 06-mcp-credit-score):
   uv run app/invoke_eks.py --region $REGION --prompt \\
-    "What is the balance on customer ID 123456's mortgage?"
+    "Get the credit score for synthetic customer ID workshop-customer-12345."
   uv run app/invoke_eks.py --region $REGION --trail last
 
 To change settings without rebuilding, rerun with: --image-uri $IMAGE_URI

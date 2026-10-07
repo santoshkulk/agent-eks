@@ -34,6 +34,14 @@ credit-services team. This setup does not build or deploy the
 Workshop Studio-provisioned environment. Do not substitute an arbitrary MCP
 endpoint or modify that MCP server to work around this limitation.
 
+## If `kubectl` starts timing out
+
+The script restricts the EKS API endpoint to the public IP of the machine that ran it
+(`--public-access-cidr` overrides this). If your IP changes (VPN, new network),
+`kubectl` fails with `dial tcp ...:443: i/o timeout`. Rerun the same
+`deploy-infrastructure.sh` command: it detects the new address and updates the stack in
+about two minutes.
+
 To remove all workshop resources:
 
 ```bash

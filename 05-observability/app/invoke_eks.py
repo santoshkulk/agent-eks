@@ -432,8 +432,10 @@ def main() -> int:
         )
         save_state(args.state_file, state)
 
-        print(f"Actor:   {actor_id}")
-        print(f"Session: {session_id}")
+        # With --json, keep stdout machine-readable: context goes to stderr.
+        context_stream = sys.stderr if args.json else sys.stdout
+        print(f"Actor:   {actor_id}", file=context_stream)
+        print(f"Session: {session_id}", file=context_stream)
 
         requests = state.setdefault("requests", {})
 

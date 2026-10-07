@@ -41,7 +41,8 @@ class ApprovalHook(HookProvider):
         self.required_tools = required_tools
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
-        # Register before AuditHook so a paused call is audited once, when it runs.
+        # Register before AuditHook so the approval decision is made first; Strands still runs the
+        # remaining callbacks after an interrupt, so a paused call has one tool_start per attempt.
         registry.add_callback(BeforeToolCallEvent, self._before_tool_call)
 
     def _before_tool_call(self, event: BeforeToolCallEvent) -> None:

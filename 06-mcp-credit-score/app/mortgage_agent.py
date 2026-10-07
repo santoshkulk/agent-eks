@@ -363,7 +363,8 @@ def _supervisor_model() -> BedrockModel | str:
 
 
 def _hooks(agent_id: str, system_prompt: str, *, fail_fast: bool = False) -> list[Any]:
-    # Order matters: resume first, then approval (so a paused call is audited once).
+    # Order matters: resume first, then approval, then audit. Strands still runs the audit
+    # callback after an approval interrupt, so a paused call has a tool_start but no tool_call.
     hooks: list[Any] = [
         ResumeHook(agent_id, system_prompt),
         ApprovalHook(agent_id),

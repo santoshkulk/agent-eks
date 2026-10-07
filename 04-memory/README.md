@@ -26,8 +26,11 @@ After completing this lab, you will be able to:
 
 ## Estimated time
 
-Allow approximately 90 to 120 minutes, including deployment, the memory
-exercises, and the audit and resume exercises. Step 17 is optional.
+Allow about 70 minutes (about 60 without the optional Step 17), including
+deployment, the memory exercises, and the audit and resume exercises. Roughly 30
+minutes of that is reading, 25 is typing commands, and 12 is waiting for
+deployments and rollouts. A first image build with a cold cache adds about 10
+minutes.
 
 ## What changed from the previous Lab 04
 
@@ -312,7 +315,7 @@ uv sync --frozen
 uv run python -m unittest discover --start-directory tests --verbose
 ```
 
-The first run installs the locked dependencies (a minute or two). The 101 tests
+The first run installs the locked dependencies (a minute or two). The 109 tests
 do not invoke Bedrock or modify AWS. They cover the API contract, identifier
 rules, TTL separation, client state, audit chaining, leases, the ledger, and
 approvals. `tests/test_agent_flows.py` runs the real supervisor, `as_tool`
@@ -409,8 +412,9 @@ uv run scripts/hydrate_memory.py clear --region us-west-2              # memorie
 uv run scripts/hydrate_memory.py clear --region us-west-2 --all-data   # sessions and memories
 ```
 
-`--all-data` removes the actor's snapshots and memories but not its audit,
-execution, lock, or ledger items.
+`--all-data` removes the actor's snapshots and memories (including the conversation you built in
+Steps 5 to 7) but not its audit, execution, lock, or ledger items. If the agent saved a
+preference earlier on its own, `seed --replace` reports removing it.
 
 ## Step 9: Let the agent save a long-term preference, with provenance
 
@@ -453,7 +457,7 @@ uv run app/invoke_eks.py --trail last --json | tail -n +3 | python3 -c \
   'import json,sys; print(json.dumps(json.load(sys.stdin)["explanation"]["memories_used"], indent=2))'
 ```
 
-`memories_used` lists the retrieved keys, scores, and content (empty if the model
+`memories_used` lists the retrieved keys, scores (a distance: lower is closer, results are sorted ascending), and content (empty if the model
 did not call `search_memory`).
 
 ## Step 11: Test semantic retrieval
@@ -527,7 +531,8 @@ RID=demo-$(date +%s)
 # and would skip the tool (and the fault) for a customer it has already looked up.
 uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 654321's mortgage?"   # HTTP 500
 
-kubectl set env deployment/mortgage-assistant -n mortgage-assistant FAULT_INJECTION_ENABLED=false
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=false FAULT_INJECTION_MODE=delay
 kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
 
 uv run app/invoke_eks.py --resume $RID     # completes as attempt 2
@@ -547,7 +552,9 @@ does the same through the script and also resets any `kubectl set env` changes.)
 uv run app/invoke_eks.py --prompt "Start a new application: customer 123456, name Sam, age 30, annual income 90000, annual expenses 40000. Create the application now."
 ```
 
-A good response says `Awaiting approval for: create_loan_application` (HTTP 202).
+A good response prints `Awaiting approval for:` followed by the gated tool
+(`approve_create_loan_application: {...}`) and `status: awaiting_approval`; the API
+returns HTTP 202 for it.
 If the model asks a follow-up question instead, answer it with another
 `--prompt` until you see the approval request; `--approve` reports "has no
 pending approvals" otherwise.
@@ -591,7 +598,7 @@ before resuming, otherwise the retry runs the same tool and crashes the pod agai
 
 ```bash
 kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
-  FAULT_INJECTION_ENABLED=false LEASE_SECONDS=180
+  FAULT_INJECTION_ENABLED=false FAULT_INJECTION_MODE=delay LEASE_SECONDS=180
 kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
 uv run app/invoke_eks.py --resume $RID
 uv run app/invoke_eks.py --trail $RID      # attempt 1 stops mid-turn; the next attempt starts with a rollback record
@@ -617,7 +624,14 @@ All routes except the health probes require `Authorization: Bearer <key>`.
 | `GET /sessions/{session_id}/executions?actor_id=` | Execution summaries for a session. |
 | `GET /health`, `GET /health/ready` | Liveness; readiness also reports the Knowledge Base ID, model, memory table, and embedding model. |
 
+To call the API directly, export the endpoint and key first (the client does this
+for you):
+
 ```bash
+export MORTGAGE_API_URL="http://$(kubectl get service mortgage-assistant -n mortgage-assistant \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+export MORTGAGE_API_KEY="$(kubectl get secret mortgage-assistant-api-key -n mortgage-assistant \
+  -o jsonpath='{.data.api-key}' | base64 --decode)"
 curl --request POST "$MORTGAGE_API_URL/invoke" \
   --header "Authorization: Bearer $MORTGAGE_API_KEY" \
   --header "Content-Type: application/json" \
@@ -726,6 +740,13 @@ Confirm Parameter Store discovery works and read the pod logs (`kubectl logs
 --namespace mortgage-assistant deployment/mortgage-assistant --tail=200`). If
 discovery works but access is denied, use the Workshop Studio support path to
 verify the EKS Pod Identity permissions.
+
+### `kubectl` or the deploy script times out
+
+`Unable to connect to the server: dial tcp ...:443: i/o timeout` usually means your public IP
+changed since Lab 0 and the EKS API only allows the old one. Rerun
+`./00-workshop-setup/scripts/deploy-infrastructure.sh --region us-west-2` (about two minutes).
+The deploy script also re-detects your IP for the load balancer's source range.
 
 ### The audit chain is invalid or records are missing
 
