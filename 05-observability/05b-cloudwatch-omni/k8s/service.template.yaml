@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mortgage-assistant-omni
+  namespace: mortgage-assistant
+  labels:
+    app.kubernetes.io/name: mortgage-assistant-omni
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mortgage-assistant-omni
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mortgage-assistant-omni
+    spec:
+      serviceAccountName: mortgage-assistant
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload: mortgage-assistant
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mortgage-assistant-omni
+          image: __IMAGE_URI__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AWS_REGION
+              value: __AWS_REGION__
+            - name: AWS_DEFAULT_REGION
+              value: __AWS_REGION__
+            - name: MODEL_ID
+              value: __MODEL_ID__
+            - name: KB_PARAMETER_NAME
+              value: __KB_PARAMETER_NAME__
+            - name: MEMORY_TABLE_NAME
+              value: __MEMORY_TABLE_NAME__
+            - name: MEMORY_VECTOR_INDEX_NAME
+              value: __MEMORY_VECTOR_INDEX_NAME__
+            - name: MEMORY_EMBEDDING_MODEL_ID
+              value: __MEMORY_EMBEDDING_MODEL_ID__
+            - name: MEMORY_SESSION_TTL_SECONDS
+              value: "__MEMORY_SESSION_TTL_SECONDS__"
+            # CloudWatch Omni path: the ADOT distro exports to the regional
+            # X-Ray OTLP endpoint, signed by the pod's Pod Identity role.
+            # OTEL_EXPORTER_OTLP_ENDPOINT must stay unset so ADOT derives it.
+            - name: AGENT_OBSERVABILITY_ENABLED
+              value: "true"
+            - name: AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT
+              value: "true"
+            - name: OTEL_PYTHON_DISTRO
+              value: aws_distro
+            - name: OTEL_PYTHON_CONFIGURATOR
+              value: aws_configurator
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.name=mortgage-assistant-omni,deployment.environment.name=workshop,aws.log.group.names=__TRACE_LOG_GROUP__
+            - name: OTEL_EXPORTER_OTLP_TRACES_HEADERS
+              value: x-aws-log-group=__TRACE_LOG_GROUP__,x-aws-log-stream=mortgage-assistant-omni
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+            - name: OTEL_TRACES_EXPORTER
+              value: otlp
+            - name: OTEL_LOGS_EXPORTER
+              value: none
+            - name: OTEL_METRICS_EXPORTER
+              value: none
+            # Langfuse path (empty for a CloudWatch-only deployment).
+            - name: LANGFUSE_OTLP_ENDPOINT
+              value: "__LANGFUSE_OTLP_ENDPOINT__"
+            - name: TELEMETRY_MASK_CONTENT
+              value: "__TELEMETRY_MASK_CONTENT__"
+            - name: FAULT_INJECTION_ENABLED
+              value: "__FAULT_INJECTION_ENABLED__"
+            - name: FAULT_INJECTION_TOOL
+              value: __FAULT_INJECTION_TOOL__
+            - name: FAULT_INJECTION_MODE
+              value: __FAULT_INJECTION_MODE__
+            - name: FAULT_INJECTION_DELAY_SECONDS
+              value: "__FAULT_INJECTION_DELAY_SECONDS__"
+            - name: MORTGAGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mortgage-assistant-api-key
+                  key: api-key
+            - name: LANGFUSE_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-otel-auth
+                  key: otlp-headers
+                  optional: true
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mortgage-assistant-omni
+  namespace: mortgage-assistant
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mortgage-assistant-omni
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

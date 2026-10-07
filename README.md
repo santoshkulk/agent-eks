@@ -13,7 +13,8 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally. |
 | 3 | `03-eks-service` | Deploy the assistant as a persistent two-replica FastAPI service on EKS. |
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB. |
-| 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
+| 5a | `05-observability/05a-langfuse` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
+| 5b | `05-observability/05b-cloudwatch-omni` | Optional: send the same traces to Amazon CloudWatch Omni, alongside or instead of Langfuse. |
 | 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
@@ -110,15 +111,25 @@ uv run app/invoke_eks.py --region us-west-2 --show-context
 
 See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, and cleanup exercises.
 
-## Lab 5: Add OpenTelemetry and Langfuse Observability
+## Lab 5a: Add OpenTelemetry and Langfuse Observability
 
 ```bash
-cd ../05-observability
+cd ../05-observability/05a-langfuse
 uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-observability.sh --region us-west-2
 ```
 
-See [`05-observability/README.md`](05-observability/README.md) for trace correlation, content masking, controlled fault injection, and Langfuse exercises.
+See [`05-observability/05a-langfuse/README.md`](05-observability/05a-langfuse/README.md) for trace correlation, content masking, controlled fault injection, and Langfuse exercises.
+
+## Lab 5b: Send traces to CloudWatch Omni (optional)
+
+```bash
+cd ../05b-cloudwatch-omni
+uv run python -m unittest discover --start-directory tests --verbose
+./scripts/deploy-omni.sh --region us-west-2
+```
+
+See [`05-observability/05b-cloudwatch-omni/README.md`](05-observability/05b-cloudwatch-omni/README.md).
 
 ## Lab 6: Integrate MCP Tools with the Strands Agent
 

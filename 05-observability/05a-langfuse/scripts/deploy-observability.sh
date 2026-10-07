@@ -25,7 +25,7 @@ LANGFUSE_URL_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/url"
 
 usage() {
   cat <<'EOF'
-Usage: 05-observability/scripts/deploy-observability.sh [options]
+Usage: 05-observability/05a-langfuse/scripts/deploy-observability.sh [options]
 
 Options:
   --region REGION                    AWS Region (default: us-west-2).
@@ -352,7 +352,7 @@ Langfuse through a private VPC origin, so the Langfuse pods themselves
 still have no direct public inbound access.
 
 Start the observability exercises:
-  cd 05-observability
+  cd 05-observability/05a-langfuse
   uv run app/invoke_eks.py --region $REGION --prompt \\
     "What are the benefits of a 15-year mortgage?"
 EOF

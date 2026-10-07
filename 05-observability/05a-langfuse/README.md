@@ -318,7 +318,7 @@ traces straight to the `langfuse-web` Service inside the cluster.
 ## Step 1: Review the Lab 05 files
 
 ```text
-05-observability/
+05-observability/05a-langfuse/
 ├── app/
 │   ├── inspect_memory.py
 │   ├── invoke_eks.py
@@ -347,7 +347,7 @@ API response, and support fault injection.
 From the repository root:
 
 ```bash
-cd 05-observability
+cd 05-observability/05a-langfuse
 
 uv run python -m unittest discover \
   --start-directory tests \
