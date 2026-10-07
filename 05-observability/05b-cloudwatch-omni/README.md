@@ -77,7 +77,7 @@ Omni domain `mortgage-<account-id>` and its `mortgage-assistant` space, and
 Space Admin grants for the participant, ops, and Code Editor roles. You only
 sign in.
 
-## Run
+## Deploy
 
 The deployment uses the shared workshop foundation (EKS cluster, ECR, memory
 table, Knowledge Base). It creates its own Secret and its own Deployment and
@@ -89,17 +89,66 @@ uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-omni.sh --region us-west-2
 ```
 
-The Service is ClusterIP only. To send more requests, open a tunnel:
+The API is exposed through a Network Load Balancer limited to your IP address
+(override with `--service-access-cidr`). When the script finishes, it prints the
+API endpoint and the **CloudWatch Omni details for this account**: the domain
+URL, a console link, and the space name.
+
+## Test the agent
 
 ```bash
-kubectl port-forward --namespace mortgage-assistant service/mortgage-assistant-omni 18080:80 &
-uv run app/invoke_eks.py --region us-west-2 --url http://127.0.0.1:18080 \
-  --prompt "What are the benefits of a 15-year mortgage?"
+./scripts/test-agent.sh --region us-west-2
 ```
 
-Then open the Omni URL from `/workshop/mortgage-assistant/cloudwatch/omni-domain-url`,
-choose the `mortgage-assistant` space, and open **Agent traces**. A trace
-appears within about five minutes.
+The script sends four requests through the deployed API and prints the trace ID
+of each:
+
+| Request | What it exercises |
+| --- | --- |
+| General question: "What are the benefits of a 15-year mortgage?" | Supervisor, then the Knowledge Base specialist and its model calls |
+| Existing mortgage lookup: "What is the outstanding principal on account 555000111?" | Supervisor, then the account specialist and the `get_mortgage_details` tool |
+| Conversation, turn 1: "I am considering a property worth 600,000 dollars." | A new session |
+| Conversation, turn 2: "What property value did I mention in this conversation?" | The same session, with the earlier turn recalled from memory |
+
+For your own prompts, use the same client as the earlier labs:
+
+```bash
+uv run app/invoke_eks.py --region us-west-2 --prompt "What are the benefits of a 15-year mortgage?"
+```
+
+## Navigate to CloudWatch Omni
+
+The deploy script prints the Omni details. You can also read them any time:
+
+```bash
+aws ssm get-parameter --name /workshop/mortgage-assistant/cloudwatch/omni-domain-url \
+  --region us-west-2 --query Parameter.Value --output text
+```
+
+1. **Sign in to the AWS console** with your workshop role, in `us-west-2`.
+2. **Open Omni.** Use the **Console** link from the deploy output
+   (`https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#settings:/omni`),
+   or the **Domain URL** (`https://mortgage-<account-id>.cloudwatch-omni.global.app.aws`).
+   The domain has no identity provider, so it signs you in with your IAM role,
+   which works most reliably when you start from the console.
+3. **Choose the `mortgage-assistant` space.** You land on the Omni home page. Its
+   "Complete your setup" cards are optional and not needed for this lab; use
+   **Dismiss**.
+4. **Find your traces.**
+   - Open **Agent observability** on the home page (for example **Agent
+     overview**) to see the agent, its latency, errors, and token usage.
+   - Open **Traces** to list individual requests. Set the time range to the last
+     hour and search for a trace ID printed by `test-agent.sh`.
+   - Open a trace to see the span waterfall: `mortgage_assistant.invoke`, the
+     supervisor, each specialist, and every model and tool call, with inputs,
+     outputs, and token counts.
+   - The two "Conversation" requests share one `session.id`, so you can compare
+     them.
+5. **Allow time.** A trace appears about five minutes after the request. If the
+   list is empty, wait, refresh, and widen the time range.
+
+Menu names can differ slightly between console releases. If you do not see
+**Agent observability**, search the home page for "traces".
 
 ## Clean up
 

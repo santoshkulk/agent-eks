@@ -138,8 +138,18 @@ kind: Service
 metadata:
   name: mortgage-assistant-omni
   namespace: mortgage-assistant
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /health
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
 spec:
-  type: ClusterIP
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  loadBalancerSourceRanges:
+    - __SERVICE_ACCESS_CIDR__
   selector:
     app.kubernetes.io/name: mortgage-assistant-omni
   ports:

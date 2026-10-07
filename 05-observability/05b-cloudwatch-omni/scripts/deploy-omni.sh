@@ -4,6 +4,7 @@ set -euo pipefail
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 PROFILE=""
+SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
 SESSION_TTL_SECONDS="604800"
 MODEL_ID="us.anthropic.claude-sonnet-4-6"
@@ -12,7 +13,6 @@ FAULT_INJECTION_ENABLED="false"
 FAULT_INJECTION_TOOL="get_mortgage_details"
 FAULT_INJECTION_MODE="delay"
 FAULT_INJECTION_DELAY_SECONDS="5"
-LOCAL_PORT="18080"
 CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
 MEMORY_TABLE_PARAMETER_NAME="/workshop/mortgage-assistant/memory/table-name"
@@ -32,6 +32,7 @@ Lab 5a and does not modify any Lab 5a resource.
 Options:
   --region REGION                    AWS Region (default: us-west-2).
   --profile PROFILE                  AWS CLI profile; omit to use the default profile.
+  --service-access-cidr CIDR         CIDR allowed to invoke the API.
   --prompt TEXT                      Prompt used for the deployment smoke test.
   --session-ttl-seconds N            Short-term session retention (default: 604800).
   --fault-injection-enabled          Enable the fault-injection exercise at deploy time.
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
     --session-ttl-seconds) SESSION_TTL_SECONDS="$2"; shift 2 ;;
     --fault-injection-enabled) FAULT_INJECTION_ENABLED="true"; shift ;;
@@ -92,6 +94,11 @@ ssm_parameter() {
   printf '%s' "$value"
 }
 
+if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
+  PUBLIC_IP="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+  SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
+fi
+
 CLUSTER_NAME="$(ssm_parameter "$CLUSTER_PARAMETER_NAME")"
 REPOSITORY_URI="$(ssm_parameter "$REPOSITORY_PARAMETER_NAME")"
 MEMORY_TABLE_NAME="$(ssm_parameter "$MEMORY_TABLE_PARAMETER_NAME")"
@@ -109,19 +116,31 @@ fi
 
 MEMORY_STATUS="$(aws_cli dynamodb describe-table --table-name "$MEMORY_TABLE_NAME" \
   --query 'Table.TableStatus' --output text)"
-if [[ "$MEMORY_STATUS" != "ACTIVE" ]]; then
-  echo "Workshop Studio memory storage is not ready ($MEMORY_STATUS)." >&2
+MEMORY_INDEX_STATUS="$(aws_cli dynamodb describe-table --table-name "$MEMORY_TABLE_NAME" \
+  --query "Table.VectorIndexes[?IndexName=='${MEMORY_VECTOR_INDEX_NAME}'].IndexStatus | [0]" \
+  --output text)"
+if [[ "$MEMORY_STATUS" != "ACTIVE" || "$MEMORY_INDEX_STATUS" != "ACTIVE" ]]; then
+  echo "Workshop Studio memory storage is not ready." >&2
+  echo "  Table: $MEMORY_STATUS" >&2
+  echo "  Vector index: $MEMORY_INDEX_STATUS" >&2
   exit 1
 fi
 
 echo "Configuring kubectl for $CLUSTER_NAME"
 aws_cli eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME"
 
+if ! kubectl rollout status \
+  --namespace kube-system \
+  deployment/aws-load-balancer-controller \
+  --timeout=2m; then
+  echo "AWS Load Balancer Controller is not ready." >&2
+  exit 1
+fi
+
 # Namespace and ServiceAccount are the shared workshop objects; applying is idempotent.
 kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
 
 # Lab 5b owns its Secret, so it neither requires nor modifies Lab 5a.
-
 if kubectl get secret mortgage-assistant-omni-api-key \
   --namespace mortgage-assistant >/dev/null 2>&1; then
   API_KEY="$(kubectl get secret mortgage-assistant-omni-api-key \
@@ -154,14 +173,7 @@ fi
 docker push "$IMAGE_URI"
 
 SERVICE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mortgage-omni-service.XXXXXX.yaml")"
-PORT_FORWARD_PID=""
-cleanup_temp() {
-  rm -f "$SERVICE_MANIFEST"
-  if [[ -n "$PORT_FORWARD_PID" ]]; then
-    kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup_temp EXIT
+trap 'rm -f "$SERVICE_MANIFEST"' EXIT
 
 sed \
   -e "s|__IMAGE_URI__|$IMAGE_URI|g" \
@@ -172,6 +184,7 @@ sed \
   -e "s|__MEMORY_VECTOR_INDEX_NAME__|$MEMORY_VECTOR_INDEX_NAME|g" \
   -e "s|__MEMORY_EMBEDDING_MODEL_ID__|$MEMORY_EMBEDDING_MODEL_ID|g" \
   -e "s|__MEMORY_SESSION_TTL_SECONDS__|$SESSION_TTL_SECONDS|g" \
+  -e "s|__SERVICE_ACCESS_CIDR__|$SERVICE_ACCESS_CIDR|g" \
   -e "s|__TRACE_LOG_GROUP__|$TRACE_LOG_GROUP|g" \
   -e "s|__FAULT_INJECTION_ENABLED__|$FAULT_INJECTION_ENABLED|g" \
   -e "s|__FAULT_INJECTION_TOOL__|$FAULT_INJECTION_TOOL|g" \
@@ -188,18 +201,33 @@ if ! kubectl rollout status --namespace mortgage-assistant \
   exit 1
 fi
 
-echo "Opening a local tunnel to the in-cluster Service on port $LOCAL_PORT"
-kubectl port-forward --namespace mortgage-assistant \
-  service/mortgage-assistant-omni "${LOCAL_PORT}:80" >/dev/null 2>&1 &
-PORT_FORWARD_PID=$!
-
-for _ in $(seq 1 30); do
-  if curl --fail --silent --max-time 5 "http://127.0.0.1:${LOCAL_PORT}/health/ready" >/dev/null; then
+echo "Waiting for the Network Load Balancer endpoint"
+SERVICE_ENDPOINT=""
+for _ in $(seq 1 60); do
+  SERVICE_ENDPOINT="$(kubectl get service mortgage-assistant-omni \
+    --namespace mortgage-assistant \
+    --output jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+  if [[ -n "$SERVICE_ENDPOINT" ]]; then
     break
   fi
-  sleep 5
+  sleep 10
 done
-if ! curl --fail --silent --max-time 5 "http://127.0.0.1:${LOCAL_PORT}/health/ready" >/dev/null; then
+if [[ -z "$SERVICE_ENDPOINT" ]]; then
+  kubectl describe service mortgage-assistant-omni --namespace mortgage-assistant
+  echo "Timed out waiting for the Network Load Balancer endpoint." >&2
+  exit 1
+fi
+
+echo "Waiting for the mortgage API readiness endpoint"
+for _ in $(seq 1 60); do
+  if curl --fail --silent --connect-timeout 5 --max-time 10 \
+    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
+    break
+  fi
+  sleep 10
+done
+if ! curl --fail --silent --connect-timeout 5 --max-time 10 \
+  "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null; then
   kubectl logs --namespace mortgage-assistant deployment/mortgage-assistant-omni --tail=200 || true
   echo "Mortgage API did not become ready." >&2
   exit 1
@@ -211,9 +239,9 @@ PROMPT_JSON="$(python3 -c \
   "$PROMPT" "deployment-smoke-test" "$SMOKE_SESSION")"
 
 echo
-echo "Smoke-test response:"
+echo "Mortgage assistant smoke-test response:"
 SMOKE_RESPONSE="$(curl --fail --silent --show-error --max-time 300 \
-  --request POST "http://127.0.0.1:${LOCAL_PORT}/invoke" \
+  --request POST "http://${SERVICE_ENDPOINT}/invoke" \
   --header "Authorization: Bearer ${API_KEY}" \
   --header "Content-Type: application/json" \
   --data "$PROMPT_JSON")"
@@ -222,26 +250,35 @@ echo "$SMOKE_RESPONSE"
 SMOKE_TRACE_ID="$(python3 -c \
   'import json, sys; print(json.loads(sys.argv[1]).get("trace_id") or "")' "$SMOKE_RESPONSE")"
 
+OMNI_CONSOLE_URL="https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#settings:/omni"
+
 cat <<EOT
 
 
 Lab 5b completed.
   Image: $IMAGE_URI
+  API endpoint: http://${SERVICE_ENDPOINT}
+  API key: $API_KEY
   Trace log group: $TRACE_LOG_GROUP
-  CloudWatch Omni: $OMNI_DOMAIN_URL
+
+CloudWatch Omni for this account:
+  Domain URL:  $OMNI_DOMAIN_URL
+  Console:     $OMNI_CONSOLE_URL
+  Space:       mortgage-assistant
+Sign in to the AWS console with your workshop role, open the Console link to
+reach Omni, then choose the mortgage-assistant space.
 EOT
 if [[ -n "$SMOKE_TRACE_ID" ]]; then
   echo "  Smoke-test trace ID: $SMOKE_TRACE_ID"
   echo
-  echo "A trace appears under Agent traces in Omni within about five minutes."
+  echo "A trace appears in CloudWatch Omni within about five minutes."
 else
   echo
   echo "WARNING: the response had no trace_id. Check the pod logs for ADOT startup errors."
 fi
 cat <<EOT
 
-Invoke more requests through the tunnel:
-  kubectl port-forward --namespace mortgage-assistant service/mortgage-assistant-omni ${LOCAL_PORT}:80 &
-  uv run app/invoke_eks.py --region $REGION --url http://127.0.0.1:${LOCAL_PORT} \\
-    --prompt "What are the benefits of a 15-year mortgage?"
+Next, send test requests and look up their traces in Omni:
+  cd 05-observability/05b-cloudwatch-omni
+  ./scripts/test-agent.sh --region $REGION
 EOT
