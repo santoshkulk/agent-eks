@@ -13,7 +13,7 @@ earlier lab.
 This README documents only what Lab 6 adds. The rest of the service is the Lab 5 checkpoint, which itself builds on Lab 4:
 
 - [Lab 4 (`../04-memory/README.md`)](../04-memory/README.md): the FastAPI service, the supervisor with three specialists as agents-as-tools (each with its own persistent session), DynamoDB session snapshots and semantic long-term memory, the hash-chained audit trail, `GET /executions/{request_id}`, `request_id` idempotency with resume and replay, the tool ledger, Strands-interrupt approvals (`--approve`, `--deny`, `--cancel`), the session lease with heartbeat, the 429 agent-turn cap, the fault-injection modes (`delay`, `error`, `abort`, `crash`), and the participant state client, inspection and hydration utilities.
-- [Lab 5 (`../05-observability/README.md`)](../05-observability/README.md): OpenTelemetry tracing to self-hosted Langfuse, the `trace_id` in every response, content masking, and the `langfuse-otel-auth` Secret.
+- [Lab 5a (`../05-observability/05a-langfuse/README.md`)](../05-observability/05a-langfuse/README.md): OpenTelemetry tracing to self-hosted Langfuse, the `trace_id` in every response, content masking, and the `langfuse-otel-auth` Secret.
 
 What Lab 6 adds:
 

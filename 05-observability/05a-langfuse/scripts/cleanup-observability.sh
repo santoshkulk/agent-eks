@@ -7,7 +7,7 @@ CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 
 usage() {
   cat <<'EOF'
-Usage: 05-observability/scripts/cleanup-observability.sh [options]
+Usage: 05-observability/05a-langfuse/scripts/cleanup-observability.sh [options]
 
 Options:
   --region REGION    AWS Region (default: us-west-2).

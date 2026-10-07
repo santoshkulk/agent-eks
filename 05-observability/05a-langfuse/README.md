@@ -21,7 +21,7 @@ Application Signals.
 
 Lab 5 is a complete checkpoint of Lab 4 plus tracing. This README documents
 only what Lab 5 adds. For the rest of the service, see
-[Lab 4 (`../04-memory/README.md`)](../04-memory/README.md):
+[Lab 4 (`../../04-memory/README.md`)](../../04-memory/README.md):
 
 - the FastAPI service and the supervisor with three specialists as
   agents-as-tools, each a persistent `Agent` with its own session;
@@ -497,7 +497,7 @@ traces straight to the `langfuse-web` Service inside the cluster.
 ## Step 1: Review the Lab 5 files
 
 ```text
-05-observability/
+05-observability/05a-langfuse/
 ├── app/
 │   ├── approvals.py
 │   ├── audit.py
@@ -547,7 +547,7 @@ code; it is simply always empty there because Lab 4 has no tracing.
 From the repository root:
 
 ```bash
-cd 05-observability
+cd 05-observability/05a-langfuse
 
 uv run python -m unittest discover tests
 ```
@@ -1315,7 +1315,7 @@ the DynamoDB table, and your traces stay in Langfuse.
 To run Lab 4 again afterward:
 
 ```bash
-cd ../04-memory
+cd ../../04-memory
 ./scripts/deploy-memory.sh --region us-west-2
 ```
 
@@ -1351,4 +1351,4 @@ Continue to Lab 6, which adds a remote credit-score tool exposed over the
 Model Context Protocol (MCP) to this instrumented, audited supervisor. Lab 6
 keeps Lab 5's tracing and `langfuse-otel-auth` Secret, so the remote call
 appears both in the audit trail and in Langfuse:
-[`../06-mcp-credit-score/README.md`](../06-mcp-credit-score/README.md).
+[`../../06-mcp-credit-score/README.md`](../../06-mcp-credit-score/README.md).

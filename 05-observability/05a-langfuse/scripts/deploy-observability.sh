@@ -34,7 +34,7 @@ LANGFUSE_URL_PARAMETER_NAME="/workshop/mortgage-assistant/langfuse/url"
 
 usage() {
   cat <<'EOF'
-Usage: 05-observability/scripts/deploy-observability.sh [options]
+Usage: 05-observability/05a-langfuse/scripts/deploy-observability.sh [options]
 
 Options:
   --region REGION                    AWS Region (default: us-west-2).
@@ -469,7 +469,7 @@ Lab 05 completed.
 The mortgage-assistant API key and the langfuse-otel-auth Secret (created from
 Secrets Manager) were not printed.
 
-Try it (from 05-observability):
+Try it (from 05-observability/05a-langfuse):
   uv run app/invoke_eks.py --region $REGION --prompt \\
     "What is the balance on customer ID 123456's mortgage?"
   uv run app/invoke_eks.py --region $REGION --trail last
