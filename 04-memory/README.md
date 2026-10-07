@@ -694,6 +694,7 @@ but the trail endpoint returns full tool results and prompts.
   and `tests/test_integrity.py` checks that the private attributes still exist.
   Strands is therefore pinned to `>=1.56.0,<1.57`; after bumping the pin, run the
   tests and repeat the approval exercise before releasing.
+- **CPU under bursts.** Each pod has a 1-core limit. When several agent turns start at the same instant, `/health` can answer several seconds late (up to about 10 s was measured with 4 simultaneous turns per pod). The probes tolerate this (liveness restarts a pod only after 6 consecutive failures, and no pod restarted in the burst test); lower `AGENT_CONCURRENCY` or raise the CPU limit if you need tighter probe latency.
 - **Throttling.** At most `AGENT_CONCURRENCY` agent turns run per pod; more return
   `429`. Uvicorn's limit of 32 connections keeps health probes from starving, and
   pods get 330 seconds to finish in-flight turns on shutdown.
