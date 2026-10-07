@@ -25,4 +25,4 @@ USER 10001:10001
 EXPOSE 8080
 
 ENTRYPOINT ["uvicorn", "mortgage_api:app"]
-CMD ["--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "4"]
+CMD ["--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "32", "--timeout-graceful-shutdown", "300"]

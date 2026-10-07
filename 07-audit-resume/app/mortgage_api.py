@@ -1,13 +1,14 @@
 import hmac
 import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
 import telemetry
@@ -22,6 +23,7 @@ from mortgage_agent import (
     SPECIALIST_TOOL_NAMES,
     configure_logging,
     get_knowledge_base_id,
+    reset_pending_interrupts,
     run_supervisor,
 )
 from service import Orchestrator, Outcome
@@ -44,6 +46,10 @@ if not API_KEY:
     raise RuntimeError("MORTGAGE_API_KEY is required and must not be empty")
 
 IDENTIFIER = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+
+# Agent turns are slow and each holds a worker thread. Cap them below uvicorn's
+# --limit-concurrency so health probes and read-only calls are never starved.
+AGENT_SLOTS = threading.BoundedSemaphore(int(os.environ.get("AGENT_CONCURRENCY", "4")))
 
 
 class InvokeRequest(BaseModel):
@@ -89,14 +95,22 @@ class InvokeResponse(BaseModel):
 
 
 def authorize(authorization: str | None) -> None:
-    expected = f"Bearer {API_KEY}"
-    if not authorization or not hmac.compare_digest(authorization, expected):
+    expected = f"Bearer {API_KEY}".encode("utf-8")
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+    if not authorization or not hmac.compare_digest(
+        authorization.encode("utf-8"), expected
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
 
 @lru_cache(maxsize=1)
 def get_orchestrator() -> Orchestrator:
-    return Orchestrator(get_item_store(), run_supervisor, SPECIALIST_TOOL_NAMES)
+    return Orchestrator(
+        get_item_store(),
+        run_supervisor,
+        SPECIALIST_TOOL_NAMES,
+        reset_agents=reset_pending_interrupts,
+    )
 
 
 @app.get("/health")
@@ -165,6 +179,26 @@ def _execute(
     response: Response,
 ) -> InvokeResponse:
     started = time.monotonic()
+    if not AGENT_SLOTS.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="All agent slots are busy; retry shortly with the same request_id",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        return _execute_with_slot(action, actor_id, session_id, request_id, response, started)
+    finally:
+        AGENT_SLOTS.release()
+
+
+def _execute_with_slot(
+    action: Callable[[str | None], Outcome],
+    actor_id: str,
+    session_id: str,
+    request_id: str,
+    response: Response,
+    started: float,
+) -> InvokeResponse:
     attributes = telemetry.trace_attributes(actor_id, session_id, request_id)
     with telemetry.start_request_span("mortgage_assistant.invoke", attributes):
         trace_id = telemetry.current_trace_id()
@@ -207,9 +241,9 @@ def invoke(
 
 @app.post("/executions/{request_id}/resume", response_model=InvokeResponse)
 def resume(
-    request_id: str,
     request: ExecutionRef,
     response: Response,
+    request_id: str = Path(max_length=128, pattern=IDENTIFIER),
     authorization: str | None = Header(default=None),
 ) -> InvokeResponse:
     authorize(authorization)
@@ -231,9 +265,9 @@ def resume(
 
 @app.post("/executions/{request_id}/approvals", response_model=InvokeResponse)
 def approvals(
-    request_id: str,
     request: ApprovalRequest,
     response: Response,
+    request_id: str = Path(max_length=128, pattern=IDENTIFIER),
     authorization: str | None = Header(default=None),
 ) -> InvokeResponse:
     authorize(authorization)
@@ -252,9 +286,26 @@ def approvals(
     )
 
 
+@app.post("/executions/{request_id}/cancel")
+def cancel_execution(
+    request: ExecutionRef,
+    request_id: str = Path(max_length=128, pattern=IDENTIFIER),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Abandon a stuck or unwanted paused request so the session accepts new prompts."""
+    authorize(authorization)
+    try:
+        execution = get_orchestrator().cancel(
+            request.actor_id, request.session_id, request_id
+        )
+    except (ExecutionConflict, ExecutionNotFound) as error:
+        raise _conflict(error) from error
+    return execution.summary()
+
+
 @app.get("/executions/{request_id}")
 def execution_trail(
-    request_id: str,
+    request_id: str = Path(max_length=128, pattern=IDENTIFIER),
     actor_id: str = Query(min_length=1, max_length=128, pattern=IDENTIFIER),
     session_id: str = Query(min_length=1, max_length=128, pattern=IDENTIFIER),
     authorization: str | None = Header(default=None),
@@ -268,7 +319,7 @@ def execution_trail(
 
 @app.get("/sessions/{session_id}/executions")
 def session_executions(
-    session_id: str,
+    session_id: str = Path(max_length=128, pattern=IDENTIFIER),
     actor_id: str = Query(min_length=1, max_length=128, pattern=IDENTIFIER),
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:

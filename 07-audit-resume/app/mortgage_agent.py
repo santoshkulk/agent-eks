@@ -26,7 +26,7 @@ from memory import (
     create_session_manager,
     validate_identifier,
 )
-from resilience import ResumeHook, share_interrupts
+from resilience import ResumeHook, reset_interrupt_state, share_interrupts
 
 
 telemetry.init_telemetry()
@@ -178,6 +178,8 @@ class FailFastHook(HookProvider):
             text = " ".join(
                 block.get("text", "") for block in event.result.get("content", []) if isinstance(block, dict)
             )
+            if "already processing" in text:
+                return  # two parallel calls to one specialist: the model can retry
             trail.abort_reason = trail.abort_reason or f"{event.tool_use['name']} failed: {text}"
 
     def _before_model_call(self, event: BeforeModelCallEvent) -> None:
@@ -424,6 +426,30 @@ def create_supervisor_agent(
     )
     share_interrupts(supervisor, specialist_tools)
     return supervisor
+
+
+@tool
+def _placeholder_credit_score(customer_id: str) -> str:
+    """Placeholder so the supervisor can be rebuilt for maintenance without the MCP server."""
+    raise RuntimeError("not available")
+
+
+def reset_pending_interrupts(actor_id: str, session_id: str) -> None:
+    """Clear paused approvals on the supervisor and every specialist of a session."""
+    validated_actor_id = validate_identifier(actor_id, "actor_id")
+    validated_session_id = validate_identifier(session_id, "session_id")
+    supervisor = create_supervisor_agent(
+        actor_id=validated_actor_id,
+        session_id=validated_session_id,
+        request_id="maintenance",
+        remote_credit_score_tool=_placeholder_credit_score,
+    )
+    agents = [supervisor]
+    for registered in supervisor.tool_registry.registry.values():
+        sub_agent = getattr(registered, "agent", None)
+        if sub_agent is not None:
+            agents.append(sub_agent)
+    reset_interrupt_state(agents)
 
 
 def run_supervisor(

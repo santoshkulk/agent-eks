@@ -101,6 +101,10 @@ if [[ ! "$LEASE_SECONDS" =~ ^[0-9]+$ || "$LEASE_SECONDS" -lt 30 ]]; then
   echo "--lease-seconds must be an integer of at least 30." >&2
   exit 2
 fi
+if [[ ! "$FAULT_INJECTION_TOOL" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "--fault-injection-tool must be a tool name (letters, digits, underscores)." >&2
+  exit 2
+fi
 if [[ ! "$APPROVAL_REQUIRED_TOOLS" =~ ^[A-Za-z0-9_,]*$ ]]; then
   echo "--approval-required-tools must be a comma-separated list of tool names." >&2
   exit 2
@@ -135,6 +139,10 @@ ssm_parameter() {
 
 if [[ -z "$SERVICE_ACCESS_CIDR" ]]; then
   PUBLIC_IP="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+  if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]]; then
+    echo "Could not detect an IPv4 address (got: $PUBLIC_IP). Pass --service-access-cidr." >&2
+    exit 1
+  fi
   SERVICE_ACCESS_CIDR="${PUBLIC_IP}/32"
 fi
 
@@ -165,10 +173,12 @@ MEMORY_CHECK_OPTIONS=(
 if [[ -n "$PROFILE" ]]; then
   MEMORY_CHECK_OPTIONS+=(--profile "$PROFILE")
 fi
-read -r MEMORY_STATUS MEMORY_INDEX_STATUS < <(
-  uv run --project "$MODULE_DIR" --frozen python \
-    "$MODULE_DIR/scripts/check_memory_ready.py" "${MEMORY_CHECK_OPTIONS[@]}"
-)
+MEMORY_CHECK_OUTPUT="$(uv run --project "$MODULE_DIR" --frozen python \
+  "$MODULE_DIR/scripts/check_memory_ready.py" "${MEMORY_CHECK_OPTIONS[@]}")" || {
+  echo "Could not read the memory table $MEMORY_TABLE_NAME." >&2
+  exit 1
+}
+read -r MEMORY_STATUS MEMORY_INDEX_STATUS <<<"$MEMORY_CHECK_OUTPUT"
 if [[ "$MEMORY_STATUS" != "ACTIVE" || "$MEMORY_INDEX_STATUS" != "ACTIVE" ]]; then
   echo "Workshop Studio memory storage is not ready." >&2
   echo "  Table: $MEMORY_STATUS" >&2
@@ -397,7 +407,7 @@ PROMPT_JSON="$(python3 -c \
 
 echo
 echo "Lab 07 smoke-test response:"
-SMOKE_RESPONSE="$(curl --fail --silent --show-error \
+SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error \
   --max-time 300 \
   --request POST \
   "http://${SERVICE_ENDPOINT}/invoke" \
@@ -417,13 +427,13 @@ fi
 
 echo
 echo "Verifying the audit trail and idempotent replay for request ${SMOKE_REQUEST}:"
-SMOKE_TRAIL="$(curl --fail --silent --show-error \
+SMOKE_TRAIL="$(curl --fail-with-body --silent --show-error \
   --max-time 60 \
   --get "http://${SERVICE_ENDPOINT}/executions/${SMOKE_REQUEST}" \
   --data-urlencode "actor_id=${SMOKE_ACTOR}" \
   --data-urlencode "session_id=${SMOKE_SESSION}" \
   --header "Authorization: Bearer ${API_KEY}")"
-SMOKE_REPLAY="$(curl --fail --silent --show-error \
+SMOKE_REPLAY="$(curl --fail-with-body --silent --show-error \
   --max-time 60 \
   --request POST \
   "http://${SERVICE_ENDPOINT}/invoke" \

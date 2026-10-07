@@ -49,7 +49,7 @@ All state lives in the existing DynamoDB table, so **no infrastructure or IAM ch
 
 Records are hash-chained. `GET /executions/{request_id}` returns `chain_valid`, which is false if a record is altered, removed, or reordered. Sensitive keys (`AUDIT_REDACT_KEYS`) are masked and long values truncated; this is independent of `TELEMETRY_MASK_CONTENT`.
 
-If an audit record for a side-effecting tool cannot be written, the tool call is **blocked** (fail closed). Other records degrade to a logged, dropped record.
+If an audit record for a side-effecting tool cannot be written, the tool call is **blocked** (fail closed); side-effecting tools are also blocked once the session lease is lost. Other records degrade to a logged, dropped record, and the final `execution_completed` record carries `dropped_records` so a gap is visible. A retried write whose first reply was lost is recognised by its hash, and a second writer reloads the chain tail instead of wedging it. Records larger than 32 KB keep only a digest and preview (`truncated`).
 
 Hash chaining makes tampering evident, not impossible. For production, also stream the table to S3 with Object Lock and enable CloudTrail data events; this lab does not provision either.
 
@@ -63,18 +63,20 @@ Hash chaining makes tampering evident, not impossible. For production, also stre
 ## Resilience and resume
 
 1. **Message-level snapshots.** Snapshots are saved after every message, plus an immutable snapshot per invocation (`SNAPSHOT_HISTORY`).
-2. **Unfinished-turn rollback.** `ResumeHook` marks a turn in `agent.state` when it starts and clears it when the invocation ends. If a pod dies or the invocation raises, the next invocation rolls the agent back to the start of that turn, so the message list stays valid. The same hook reapplies the current system prompt, because a restored snapshot would otherwise keep the prompt from the day the session started.
+2. **Unfinished-turn rollback.** `ResumeHook` marks a turn in `agent.state` when it starts and clears it when the invocation ends. If a pod dies or the invocation raises, the next invocation rolls the agent back to the start of that turn, so the message list stays valid (the cut point is adjusted for messages the conversation manager trimmed meanwhile). The same hook reapplies the current system prompt, because a restored snapshot would otherwise keep the prompt from the day the session started.
 3. **Idempotent requests.** `request_id` is the idempotency key. Re-sending it replays a completed request, resumes a failed one (`attempt` increments), and returns `409` while it is still running, the session is busy, or another request in the session is waiting for approval.
-4. **Tool ledger.** Side-effecting tools (`create_customer_id`, `create_loan_application`, memory writes) run at most once per request and input; a retry gets the recorded result.
+4. **Tool ledger.** Side-effecting tools (`create_customer_id`, `create_loan_application`, memory writes) run at most once per session, request, and input; a retry gets the recorded result. The claim is a conditional write, so two identical parallel calls in one turn run the effect once and the second waits for the first's result.
 5. **Fail fast.** Strands turns a specialist's exception into an error tool result, which a model can paper over with an apology. `FailFastHook` (supervisor only) fails the request instead, so it is resumable.
-6. **Human approval.** `create_loan_application` (configurable with `APPROVAL_REQUIRED_TOOLS`) pauses with a Strands interrupt. `/invoke` returns `202` with the pending approvals. The interrupt is stored in the agent snapshots, so any pod can finish the request after the reviewer answers.
+6. **Human approval.** `create_loan_application` (configurable with `APPROVAL_REQUIRED_TOOLS`) pauses with a Strands interrupt. `/invoke` returns `202` with the pending approvals. The interrupt is stored in the agent snapshots, so any pod can finish the request after the reviewer answers. If a pod dies while continuing an approval, retrying `/invoke` or `/approvals` returns the pending approval again, and a failed approval run can be resubmitted. If an approval can no longer be completed (for example its snapshots expired after `MEMORY_SESSION_TTL_SECONDS`), `POST /executions/{id}/cancel` (`--cancel`) abandons it and clears the paused agents so the session accepts new prompts.
 
 ### SDK limits worth knowing
 
 - `Agent.as_tool` resumes a paused specialist from the same `Interrupt` object the parent registered. After a restart the parent and specialist each restore their own copy, so the reviewer's answer would not reach the specialist. `share_interrupts()` in `app/resilience.py` re-links them. It reads the SDK-private `_interrupt_state`, and `tests/test_agent_flows.py` guards it.
+- Throttling and overload: at most `AGENT_CONCURRENCY` (default 4) agent turns run per pod; more return `429` with `Retry-After`. uvicorn's own connection limit is 32, so health probes are never starved, and pods get 330 s to finish in-flight turns on shutdown.
 - The session lease is renewed by a heartbeat (every third of `LEASE_SECONDS`) while a request runs, so a long request is not taken over. If a renewal fails, the lease was lost to another worker; the trail records `lease_lost`. After a crash the lease simply expires, so a retry waits up to `LEASE_SECONDS`.
 - A crash between a side effect and its ledger write can repeat the effect once (the audit trail marks it `ledger_pending` / `possibly_executed`). Real downstream systems should also take an idempotency key.
-- `actor_id`, `session_id`, and the approval `reviewer` are caller-supplied and the API uses one shared bearer key, as in earlier labs. Audit records are attributable to those claims, not to verified identities.
+- **The bearer key is an administrator key.** `actor_id`, `session_id`, and the approval `reviewer` are caller-supplied, so anyone holding the key can read any actor's audit trail (`/executions/...`, `/sessions/...`), approve their own requests, and cancel others'. Audit records are attributable to those claims, not to verified identities. Production needs per-user authentication (for example a JWT subject mapped to `actor_id`) and a four-eyes rule on approvals. The API returns only the error class in execution summaries, but the trail endpoint returns full tool results and prompts.
+- Transport is plain HTTP through the Network Load Balancer, as in earlier labs. Put TLS (an ACM certificate on the NLB listener) in front of it before using real data.
 
 ## API
 
@@ -83,11 +85,12 @@ Hash chaining makes tampering evident, not impossible. For production, also stre
 | `POST /invoke` | `prompt`, `actor_id`, `session_id`, optional `request_id`. `200` completed, `202` awaiting approval, `409` conflict, `500` failed (retry with the same `request_id`). |
 | `POST /executions/{request_id}/resume` | Retry a failed request using its stored prompt. |
 | `POST /executions/{request_id}/approvals` | `decisions: [{interrupt_id, approved, comment, reviewer}]` for all pending approvals. |
+| `POST /executions/{request_id}/cancel` | Abandon a stuck or unwanted paused request (`CANCELLED`) and clear the paused agents. |
 | `GET /executions/{request_id}?actor_id=&session_id=` | Ordered audit records, `chain_valid`, and the explanation. |
 | `GET /sessions/{session_id}/executions?actor_id=` | Execution summaries for a session. |
 | `GET /health`, `GET /health/ready` | Probes, unchanged from Lab 6. |
 
-Configuration added to the Deployment: `APPROVAL_REQUIRED_TOOLS`, `LEASE_SECONDS`, `ENABLE_REASONING`, `SNAPSHOT_HISTORY`. The fault-injection `abort` mode (fails the request after the faulty tool returns) and `crash` mode (kills the process mid-turn) are new.
+Configuration added to the Deployment: `APPROVAL_REQUIRED_TOOLS`, `LEASE_SECONDS`, `ENABLE_REASONING`, `SNAPSHOT_HISTORY`, and (optional) `AGENT_CONCURRENCY`. The fault-injection `abort` mode (fails the request after the faulty tool returns) and `crash` mode (kills the process mid-turn) are new.
 
 ## Prerequisites
 
@@ -186,7 +189,7 @@ uv run app/invoke_eks.py --approve last --reviewer pat
 uv run app/invoke_eks.py --trail last      # shows the approval by pat and one create_loan_application call
 ```
 
-Until the approval is answered, any other request in the same session returns `409`.
+Until the approval is answered, any other request in the same session returns `409`. To abandon the approval instead of answering it, run `uv run app/invoke_eks.py --cancel last`.
 
 ### 4. Optional: crash mid-turn
 

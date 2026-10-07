@@ -55,6 +55,9 @@ def main() -> int:
     records: list[dict[str, Any]] = load_records(store, actor_id, args.session_id, args.request_id)
     execution = executions.get(actor_id, args.session_id, args.request_id)
     print(f"Execution: {execution.summary() if execution else 'not found'}")
+    if not records:
+        print("No audit records found for this actor, session, and request.")
+        return 1
     print(f"Records:   {len(records)}  hash chain valid: {verify_chain(records)}")
     print(json.dumps(build_explanation(records, SPECIALIST_TOOLS), indent=2))
     if args.records:

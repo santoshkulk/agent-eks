@@ -132,7 +132,11 @@ class AuditTrail:
         self._lock = threading.Lock()
         self.dropped = 0
         self.abort_reason: str | None = None
-        existing = load_records(store, actor_id, session_id, request_id)
+        self.lease_lost = False
+        self._reload_tail()
+
+    def _reload_tail(self) -> None:
+        existing = load_records(self.store, self.actor_id, self.session_id, self.request_id)
         self._seq = len(existing)
         self._prev_hash = existing[-1]["hash"] if existing else GENESIS_HASH
 
@@ -160,6 +164,36 @@ class AuditTrail:
                 )
 
     def _append(self, record_type: str, agent_id: str, data: dict[str, Any]) -> None:
+        # Two attempts: the second reloads the tail after losing a sequence race (for
+        # example a worker that took over the session after a lease loss).
+        for _ in range(2):
+            record = self._build(record_type, agent_id, data)
+            payload = canonical_json(record)
+            key = f"{audit_prefix(self.session_id, self.request_id)}{self._seq:06d}"
+            written = self.store.put(
+                self._pk,
+                key,
+                {
+                    "record": payload,
+                    "hash": record["hash"],
+                    "type": record_type,
+                    "seq": self._seq,
+                },
+                if_absent=True,
+            )
+            if not written:
+                # A retried PutItem whose first response was lost reports "exists" for
+                # our own record; treat an identical hash as success.
+                stored = self.store.get(self._pk, key)
+                written = bool(stored and stored.get("hash") == record["hash"])
+            if written:
+                self._seq += 1
+                self._prev_hash = record["hash"]
+                return
+            self._reload_tail()
+        raise AuditWriteError(f"audit sequence {self._seq} already exists")
+
+    def _build(self, record_type: str, agent_id: str, data: dict[str, Any]) -> dict[str, Any]:
         record: dict[str, Any] = {
             "seq": self._seq,
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -182,22 +216,7 @@ class AuditTrail:
                 "preview": payload[:1000],
             }
             record["hash"] = compute_hash(self._prev_hash, record)
-            payload = canonical_json(record)
-        written = self.store.put(
-            self._pk,
-            f"{audit_prefix(self.session_id, self.request_id)}{self._seq:06d}",
-            {
-                "record": payload,
-                "hash": record["hash"],
-                "type": record_type,
-                "seq": self._seq,
-            },
-            if_absent=True,
-        )
-        if not written:
-            raise AuditWriteError(f"audit sequence {self._seq} already exists")
-        self._seq += 1
-        self._prev_hash = record["hash"]
+        return record
 
 
 def load_records(
@@ -313,6 +332,11 @@ class AuditHook(HookProvider):
     def _before_tool_call(self, event: BeforeToolCallEvent) -> None:
         name = event.tool_use["name"]
         critical = name in SIDE_EFFECT_TOOLS
+        trail = current_trail()
+        if critical and trail is not None and trail.lease_lost:
+            # Another worker may own this session now: do not start side effects.
+            event.cancel_tool = "The session lease was lost; the action was not performed."
+            return
         try:
             self._record(
                 "tool_start",
@@ -367,12 +391,14 @@ def build_explanation(records: list[dict[str, Any]], specialist_tools: set[str])
     """Summarise why and how a request was answered from its audit records."""
     rationale_by_tool_use: dict[str, str] = {}
     for record in records:
-        if record["type"] == "decision":
+        if record["type"] == "decision" and not record["data"].get("truncated"):
             for tool_use in record["data"].get("tool_uses", []):
                 rationale_by_tool_use[tool_use["toolUseId"]] = record["data"].get("text", "")
     route, tools_used, memories, approvals, evidence = [], [], [], [], []
     for record in records:
         data = record["data"]
+        if data.get("truncated"):
+            continue  # oversized record: only a digest and preview were kept
         if record["type"] == "tool_call":
             entry = {
                 "agent": record["agent_id"],

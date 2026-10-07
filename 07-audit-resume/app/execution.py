@@ -31,6 +31,7 @@ RUNNING = "RUNNING"
 COMPLETED = "COMPLETED"
 FAILED = "FAILED"
 INTERRUPTED = "INTERRUPTED"
+CANCELLED = "CANCELLED"
 
 
 class ExecutionConflict(Exception):
@@ -116,7 +117,8 @@ class Execution:
             "session_id": self.session_id,
             "status": self.status,
             "attempt": self.attempt,
-            "error": self.error,
+            # Only the error class: messages can carry internal ARNs, URLs, or account IDs.
+            "error": self.error.split(":", 1)[0] if self.error else None,
             "interrupts": self.interrupts,
             "trace_id": self.trace_id,
         }
@@ -195,15 +197,23 @@ class ExecutionStore:
 
     def release_session(self, actor_id: str, session_id: str, request_id: str) -> None:
         pk, sk = self._pk(actor_id), self._lock_sk(session_id)
-        current = self.store.get(pk, sk)
-        if current is None or current["request_id"] != request_id:
-            return
-        self.store.put(
-            pk,
-            sk,
-            {**current, "lease_expires_at": 0, "version": int(current["version"]) + 1},
-            expect={"version": current["version"]},
-        )
+        for _ in range(3):
+            current = self.store.get(pk, sk)
+            if (
+                current is None
+                or current["request_id"] != request_id
+                or current["owner"] != self.owner
+            ):
+                return  # not ours (any more): never release someone else's lease
+            released = self.store.put(
+                pk,
+                sk,
+                {**current, "lease_expires_at": 0, "version": int(current["version"]) + 1},
+                expect={"version": current["version"]},
+            )
+            if released:
+                return
+        logger.warning("Could not release the lease for %s; it will expire", request_id)
 
     def renew_lease(self, actor_id: str, session_id: str, request_id: str) -> bool:
         """Extend the session lease for a running request. False when it was lost."""
@@ -224,8 +234,8 @@ class ExecutionStore:
             expect={"version": current["version"]},
         )
 
-    def heartbeat(self, execution: "Execution") -> "LeaseHeartbeat":
-        return LeaseHeartbeat(self, execution)
+    def heartbeat(self, execution: "Execution", on_lost: Any = None) -> "LeaseHeartbeat":
+        return LeaseHeartbeat(self, execution, on_lost=on_lost)
 
     # -- lifecycle ----------------------------------------------------------
     def begin(
@@ -249,15 +259,16 @@ class ExecutionStore:
             existing.mode = "pending_approval"
             return existing
 
-        for other in self.list_session(actor_id, session_id):
-            # The paused agents are in an interrupt state and cannot take a new prompt.
-            if other.status == INTERRUPTED and other.request_id != request_id:
-                raise PendingApproval(
-                    f"request {other.request_id} is awaiting approval; answer it first"
-                )
-
         self._acquire_session(actor_id, session_id, request_id)
         try:
+            # Checked under the lease so a request that pauses right now cannot slip past:
+            # paused agents are in an interrupt state and cannot take a new prompt.
+            for other in self.list_session(actor_id, session_id):
+                if other.status == INTERRUPTED and other.request_id != request_id:
+                    raise PendingApproval(
+                        f"request {other.request_id} is awaiting approval; answer it first"
+                    )
+
             if existing is None:
                 execution = Execution(
                     actor_id, session_id, request_id, 1, RUNNING, prompt.strip(), digest,
@@ -273,6 +284,16 @@ class ExecutionStore:
                     raise SessionBusy(f"request {request_id} is already running")
                 return execution
 
+            if existing.interrupts:
+                # A pod died while continuing an approval, or finishing an interrupted
+                # run. The agents are still paused: ask for the approval again instead
+                # of replaying the prompt into an interrupt state.
+                existing.status = INTERRUPTED
+                existing.mode = "pending_approval"
+                self._save(existing, expect_version=existing.version)
+                self.release_session(actor_id, session_id, request_id)
+                return existing
+
             execution = existing
             execution.attempt += 1
             execution.status = RUNNING
@@ -285,12 +306,36 @@ class ExecutionStore:
             self.release_session(actor_id, session_id, request_id)
             raise
 
+    @staticmethod
+    def _awaiting_approval(execution: Execution) -> bool:
+        """INTERRUPTED, or left RUNNING/FAILED by a crash while approvals were pending."""
+        return execution.status == INTERRUPTED or (
+            bool(execution.interrupts) and execution.status in (RUNNING, FAILED)
+        )
+
+    def abandon(self, actor_id: str, session_id: str, request_id: str) -> Execution:
+        """Cancel a stuck request so the session can take new prompts (CANCELLED)."""
+        existing = self.get(actor_id, session_id, request_id)
+        if existing is None:
+            raise ExecutionNotFound(f"no execution {request_id}")
+        if existing.status in (COMPLETED, CANCELLED):
+            raise InvalidExecutionState(f"execution {request_id} is already {existing.status}")
+        self._acquire_session(actor_id, session_id, request_id)
+        try:
+            existing.status = CANCELLED
+            existing.interrupts = []
+            existing.mode = "cancelled"
+            self._save(existing, expect_version=existing.version)
+        finally:
+            self.release_session(actor_id, session_id, request_id)
+        return existing
+
     def begin_approval(self, actor_id: str, session_id: str, request_id: str) -> Execution:
         """Take the lease to continue an INTERRUPTED request after reviewer decisions."""
         existing = self.get(actor_id, session_id, request_id)
         if existing is None:
             raise ExecutionNotFound(f"no execution {request_id}")
-        if existing.status != INTERRUPTED:
+        if not self._awaiting_approval(existing):
             raise InvalidExecutionState(
                 f"execution {request_id} is {existing.status}, not awaiting approval"
             )
@@ -346,21 +391,36 @@ class ExecutionStore:
 class LeaseHeartbeat:
     """Keep the session lease alive while a request runs.
 
-    Renews every third of the lease so a request that outlives ``LEASE_SECONDS`` is not
-    taken over by a retry. If a renewal fails the lease was lost (another pod took
-    over after a long stall); ``lost`` is set and the loss is audited by the caller.
+    Renews every third of the lease. A transient error (throttling) is retried on the
+    next tick; the lease counts as lost only when a renewal is refused (someone else
+    holds it) or when it has actually expired. ``on_lost`` lets the caller stop starting
+    side effects.
     """
 
-    def __init__(self, executions: ExecutionStore, execution: Execution, interval: float | None = None) -> None:
+    def __init__(
+        self,
+        executions: ExecutionStore,
+        execution: Execution,
+        interval: float | None = None,
+        on_lost: Any = None,
+    ) -> None:
         self._executions = executions
         self._execution = execution
         self._interval = interval or max(executions.lease_seconds / 3, 0.05)
+        self._on_lost = on_lost
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
         self.lost = False
         self.renewals = 0
 
+    def _mark_lost(self) -> None:
+        self.lost = True
+        logger.error("Lost the session lease for %s", self._execution.request_id)
+        if self._on_lost is not None:
+            self._on_lost()
+
     def _run(self) -> None:
+        last_renewed = time.monotonic()
         while not self._stop.wait(self._interval):
             try:
                 renewed = self._executions.renew_lease(
@@ -370,11 +430,14 @@ class LeaseHeartbeat:
                 )
             except Exception:
                 logger.exception("Lease renewal failed for %s", self._execution.request_id)
-                renewed = False
+                if time.monotonic() - last_renewed >= self._executions.lease_seconds:
+                    self._mark_lost()
+                    return
+                continue
             if not renewed:
-                self.lost = True
-                logger.error("Lost the session lease for %s", self._execution.request_id)
+                self._mark_lost()
                 return
+            last_renewed = time.monotonic()
             self.renewals += 1
 
     def __enter__(self) -> "LeaseHeartbeat":

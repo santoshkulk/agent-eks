@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from urllib.parse import quote
 
 
 DEFAULT_NAMESPACE = "mortgage-assistant"
@@ -206,7 +207,7 @@ def get_trail(
         api_url,
         api_key,
         "GET",
-        f"/executions/{request_id}",
+        f"/executions/{quote(request_id, safe='')}",
         timeout,
         params={"actor_id": actor_id, "session_id": session_id},
     )
@@ -219,7 +220,20 @@ def resume(
         api_url,
         api_key,
         "POST",
-        f"/executions/{request_id}/resume",
+        f"/executions/{quote(request_id, safe='')}/resume",
+        timeout,
+        body={"actor_id": actor_id, "session_id": session_id},
+    )
+
+
+def cancel(
+    api_url: str, api_key: str, actor_id: str, session_id: str, request_id: str, timeout: int
+) -> dict:
+    return call_api(
+        api_url,
+        api_key,
+        "POST",
+        f"/executions/{quote(request_id, safe='')}/cancel",
         timeout,
         body={"actor_id": actor_id, "session_id": session_id},
     )
@@ -254,7 +268,7 @@ def decide(
         api_url,
         api_key,
         "POST",
-        f"/executions/{request_id}/approvals",
+        f"/executions/{quote(request_id, safe='')}/approvals",
         timeout,
         body={"actor_id": actor_id, "session_id": session_id, "decisions": decisions},
     )
@@ -307,6 +321,11 @@ def main() -> int:
         "--deny",
         metavar="REQUEST_ID",
         help="Deny the pending tool calls on a request ('last' is accepted).",
+    )
+    parser.add_argument(
+        "--cancel",
+        metavar="REQUEST_ID",
+        help="Abandon a stuck or unwanted paused request (('last' is accepted).",
     )
     parser.add_argument(
         "--trail",
@@ -383,7 +402,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    actions = [args.resume, args.approve, args.deny, args.trail]
+    actions = [args.resume, args.approve, args.deny, args.trail, args.cancel]
     if sum(1 for action in actions if action) > 1:
         parser.error("use only one of --resume, --approve, --deny, and --trail")
     if not args.prompt and not args.show_context and not any(actions):
@@ -432,6 +451,10 @@ def main() -> int:
             else:
                 print_trail(trail)
             return 0
+        if args.cancel:
+            result = cancel(request_id=resolve(args.cancel), **common)
+            print(f"Cancelled request {result['request_id']} ({result['status']})")
+            return 0
         if args.resume:
             result = resume(request_id=resolve(args.resume), **common)
         elif args.approve or args.deny:
@@ -473,7 +496,7 @@ def main() -> int:
             print()
             print(f"Run with --approve {result['request_id']} or --deny {result['request_id']}")
         else:
-            print(result.get("response", json.dumps(result)))
+            print(result.get("response") or "(no response text)")
         print()
         print(f"Request ID: {result.get('request_id')} (status: {result.get('status')})")
         trace_id = result.get("trace_id")

@@ -25,6 +25,10 @@ from audit import current_trail, record_event
 INFLIGHT_KEY = "inflight"
 
 
+def _removed_count(agent: Any) -> int:
+    return int(getattr(agent.conversation_manager, "removed_message_count", 0) or 0)
+
+
 class ResumeHook(HookProvider):
     def __init__(self, agent_id: str, system_prompt: str) -> None:
         self.agent_id = agent_id
@@ -41,8 +45,12 @@ class ResumeHook(HookProvider):
         stale = agent.state.get(INFLIGHT_KEY)
         if stale:
             start = int(stale.get("start", len(agent.messages)))
+            # The conversation manager may have trimmed old messages since the turn
+            # began (even on failure); shift the cut point by what it removed.
+            trimmed = _removed_count(agent) - int(stale.get("removed", 0))
+            start = max(start - max(trimmed, 0), 0)
             discarded = max(len(agent.messages) - start, 0)
-            if 0 <= start <= len(agent.messages):
+            if start <= len(agent.messages):
                 del agent.messages[start:]
             agent.state.delete(INFLIGHT_KEY)
             record_event(
@@ -58,6 +66,7 @@ class ResumeHook(HookProvider):
                 INFLIGHT_KEY,
                 {
                     "start": len(agent.messages),
+                    "removed": _removed_count(agent),
                     "request_id": trail.request_id if trail else None,
                 },
             )
@@ -89,3 +98,20 @@ def share_interrupts(parent: Any, agent_tools: list[Any]) -> None:
         for interrupt_id, interrupt in child_state.interrupts.items():
             if interrupt_id in parent_state.interrupts:
                 parent_state.interrupts[interrupt_id] = interrupt
+
+
+def reset_interrupt_state(agents: list[Any]) -> None:
+    """Clear a paused agent's interrupt state and persist it (used to cancel an approval).
+
+    Leaves the last assistant ``toolUse`` dangling; the SDK appends a synthetic
+    ``toolResult`` the next time the agent receives a prompt. Reads SDK-private
+    ``_interrupt_state`` like ``share_interrupts``.
+    """
+    for agent in agents:
+        state = getattr(agent, "_interrupt_state", None)
+        if state is None or not state.activated:
+            continue
+        state.deactivate()
+        session_manager = getattr(agent, "_session_manager", None)
+        if session_manager is not None:
+            session_manager.sync_agent(agent)
