@@ -143,12 +143,19 @@ class Orchestrator:
                 },
             )
             try:
-                result = self.run_agent(
-                    agent_input,
-                    execution.actor_id,
-                    execution.session_id,
-                    execution.request_id,
-                )
+                with self.executions.heartbeat(execution) as heartbeat:
+                    result = self.run_agent(
+                        agent_input,
+                        execution.actor_id,
+                        execution.session_id,
+                        execution.request_id,
+                    )
+                if heartbeat.lost:
+                    trail.record(
+                        "lease_lost",
+                        "api",
+                        {"note": "another worker may have taken over this session"},
+                    )
             except BaseException as error:
                 # BaseException too: aborted requests must be recorded and resumable.
                 trail.record(

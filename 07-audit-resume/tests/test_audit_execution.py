@@ -256,6 +256,53 @@ class ExecutionStoreTests(unittest.TestCase):
         self.executions.begin(ACTOR, SESSION, "r3", "ok")
 
 
+class LeaseHeartbeatTests(unittest.TestCase):
+    def test_renew_extends_only_the_owners_lease(self) -> None:
+        store = InMemoryItemStore()
+        now = {"t": 1000.0}
+        mine = ExecutionStore(store, lease_seconds=60, owner="a", clock=lambda: now["t"])
+        other = ExecutionStore(store, lease_seconds=60, owner="b", clock=lambda: now["t"])
+        execution = mine.begin(ACTOR, SESSION, "r1", "hello")
+
+        now["t"] += 50
+        self.assertTrue(mine.renew_lease(ACTOR, SESSION, "r1"))
+        now["t"] += 50  # past the original expiry, inside the renewed one
+        with self.assertRaises(SessionBusy):
+            other.begin(ACTOR, SESSION, "r2", "x")
+        self.assertFalse(other.renew_lease(ACTOR, SESSION, "r1"))
+        mine.complete(execution, "done")
+        self.assertFalse(mine.renew_lease(ACTOR, SESSION, "r1"))
+
+    def test_heartbeat_keeps_a_long_request_from_being_taken_over(self) -> None:
+        import time as real_time
+
+        store = InMemoryItemStore()
+        # Whole-second timestamps: a 2 s lease leaves at least 1 s of margin per renewal.
+        mine = ExecutionStore(store, lease_seconds=2, owner="a")
+        other = ExecutionStore(store, lease_seconds=2, owner="b")
+        execution = mine.begin(ACTOR, SESSION, "r1", "hello")
+
+        with mine.heartbeat(execution) as heartbeat:
+            real_time.sleep(3.0)  # longer than the lease
+            with self.assertRaises(SessionBusy):
+                other.begin(ACTOR, SESSION, "r2", "x")
+            self.assertGreaterEqual(heartbeat.renewals, 2)
+        self.assertFalse(heartbeat.lost)
+
+    def test_heartbeat_reports_a_lost_lease(self) -> None:
+        import time as real_time
+
+        store = InMemoryItemStore()
+        mine = ExecutionStore(store, lease_seconds=1, owner="a")
+        execution = mine.begin(ACTOR, SESSION, "r1", "hello")
+        mine.release_session(ACTOR, SESSION, "r1")
+        ExecutionStore(store, lease_seconds=60, owner="b").begin(ACTOR, SESSION, "r2", "x")
+
+        with mine.heartbeat(execution) as heartbeat:
+            real_time.sleep(0.6)
+        self.assertTrue(heartbeat.lost)
+
+
 class LedgerTests(unittest.TestCase):
     def test_side_effect_runs_once_per_request_and_input(self) -> None:
         store = InMemoryItemStore()

@@ -12,14 +12,18 @@ expired lease), a conflict (live lease), or a pending approval (INTERRUPTED).
 
 import hashlib
 import json
+import logging
 import os
 import socket
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from store import Attrs, ItemStore
+
+logger = logging.getLogger("execution")
 
 LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "180"))
 
@@ -201,6 +205,28 @@ class ExecutionStore:
             expect={"version": current["version"]},
         )
 
+    def renew_lease(self, actor_id: str, session_id: str, request_id: str) -> bool:
+        """Extend the session lease for a running request. False when it was lost."""
+        pk, sk = self._pk(actor_id), self._lock_sk(session_id)
+        current = self.store.get(pk, sk)
+        if current is None or current["request_id"] != request_id:
+            return False
+        if current["owner"] != self.owner or int(current["lease_expires_at"]) == 0:
+            return False  # not ours, or already released
+        return self.store.put(
+            pk,
+            sk,
+            {
+                **current,
+                "lease_expires_at": self._now() + self.lease_seconds,
+                "version": int(current["version"]) + 1,
+            },
+            expect={"version": current["version"]},
+        )
+
+    def heartbeat(self, execution: "Execution") -> "LeaseHeartbeat":
+        return LeaseHeartbeat(self, execution)
+
     # -- lifecycle ----------------------------------------------------------
     def begin(
         self,
@@ -315,3 +341,46 @@ class ExecutionStore:
         execution.interrupts = interrupts
         execution.error = error[:1000] if error else None
         return self._finish(execution, INTERRUPTED)
+
+
+class LeaseHeartbeat:
+    """Keep the session lease alive while a request runs.
+
+    Renews every third of the lease so a request that outlives ``LEASE_SECONDS`` is not
+    taken over by a retry. If a renewal fails the lease was lost (another pod took
+    over after a long stall); ``lost`` is set and the loss is audited by the caller.
+    """
+
+    def __init__(self, executions: ExecutionStore, execution: Execution, interval: float | None = None) -> None:
+        self._executions = executions
+        self._execution = execution
+        self._interval = interval or max(executions.lease_seconds / 3, 0.05)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
+        self.lost = False
+        self.renewals = 0
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                renewed = self._executions.renew_lease(
+                    self._execution.actor_id,
+                    self._execution.session_id,
+                    self._execution.request_id,
+                )
+            except Exception:
+                logger.exception("Lease renewal failed for %s", self._execution.request_id)
+                renewed = False
+            if not renewed:
+                self.lost = True
+                logger.error("Lost the session lease for %s", self._execution.request_id)
+                return
+            self.renewals += 1
+
+    def __enter__(self) -> "LeaseHeartbeat":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)

@@ -45,7 +45,7 @@ All state lives in the existing DynamoDB table, so **no infrastructure or IAM ch
 - `decision` (the model's text and the tool calls it chose) and `model_response` / `model_error`
 - `tool_start` / `tool_call` (inputs, results, status, duration; specialists appear as tools of the supervisor, and their own tool calls appear under their own `agent_id`)
 - `memory_read` (keys and scores retrieved) and `memory_write` (with provenance)
-- `approval`, `rollback`, `ledger_replay`, `fault_injection`, and the `execution_*` lifecycle
+- `approval`, `rollback`, `ledger_replay`, `ledger_pending`, `lease_lost`, `fault_injection`, and the `execution_*` lifecycle
 
 Records are hash-chained. `GET /executions/{request_id}` returns `chain_valid`, which is false if a record is altered, removed, or reordered. Sensitive keys (`AUDIT_REDACT_KEYS`) are masked and long values truncated; this is independent of `TELEMETRY_MASK_CONTENT`.
 
@@ -58,7 +58,7 @@ Hash chaining makes tampering evident, not impossible. For production, also stre
 - The supervisor writes a `Routing rationale:` sentence before delegating. The audit trail links it to the specialist call it caused.
 - Specialists return a structured `SpecialistReport` (`answer`, `rationale`, `evidence`, `assumptions`). The supervisor answers from it, and the evidence survives in the audit trail.
 - Every `/invoke` response carries `explanation`: `route`, `tools_used`, `evidence`, `memories_used`, `approvals`, `records`, and `attempts`.
-- `ENABLE_REASONING=true` (deploy flag `--enable-reasoning`) also captures Bedrock extended-thinking blocks for the supervisor. This path is off by default and is not covered by the unit tests; verify it against your model before relying on it.
+- `ENABLE_REASONING=true` (deploy flag `--enable-reasoning`) also captures Bedrock extended-thinking blocks for the supervisor. It is off by default. It was checked against Bedrock with the default model over multiple tool-using turns; the extended-thinking budget is fixed at 2048 tokens, and models that do not support thinking will reject the request.
 
 ## Resilience and resume
 
@@ -72,7 +72,7 @@ Hash chaining makes tampering evident, not impossible. For production, also stre
 ### SDK limits worth knowing
 
 - `Agent.as_tool` resumes a paused specialist from the same `Interrupt` object the parent registered. After a restart the parent and specialist each restore their own copy, so the reviewer's answer would not reach the specialist. `share_interrupts()` in `app/resilience.py` re-links them. It reads the SDK-private `_interrupt_state`, and `tests/test_agent_flows.py` guards it.
-- A leased request is not heartbeated. A request that runs longer than `LEASE_SECONDS` can be taken over by a retry.
+- The session lease is renewed by a heartbeat (every third of `LEASE_SECONDS`) while a request runs, so a long request is not taken over. If a renewal fails, the lease was lost to another worker; the trail records `lease_lost`. After a crash the lease simply expires, so a retry waits up to `LEASE_SECONDS`.
 - A crash between a side effect and its ledger write can repeat the effect once (the audit trail marks it `ledger_pending` / `possibly_executed`). Real downstream systems should also take an idempotency key.
 - `actor_id`, `session_id`, and the approval `reviewer` are caller-supplied and the API uses one shared bearer key, as in earlier labs. Audit records are attributable to those claims, not to verified identities.
 
@@ -106,7 +106,7 @@ cd 07-audit-resume    # from the repository root
 | Flag | Effect |
 | --- | --- |
 | `--approval-required-tools LIST` | Tools that pause for human approval (default `create_loan_application`; empty disables). |
-| `--lease-seconds N` | Per-session lease, at least 30 (default 180). |
+| `--lease-seconds N` | Per-session lease, at least 30 (default 180). Renewed by a heartbeat while a request runs; a crashed request can be retried after it expires. |
 | `--enable-reasoning` | Capture Bedrock extended-thinking in the audit trail. |
 | `--no-snapshot-history` | Keep only the latest snapshot per agent. |
 | `--image-uri URI` | Reuse an image already in ECR and skip the build and push (about 2 minutes instead of about 12). |
@@ -199,7 +199,7 @@ RID=crash-$(date +%s)
 uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 777001's mortgage?"
 ```
 
-The client reports that the connection was closed and the pod restarts (`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off (`FAULT_INJECTION_ENABLED=false`), wait for the rollout, then `--resume $RID`. Resuming before the 30 second lease expires returns `409`.
+The client reports that the connection was closed and the pod restarts (`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off (`FAULT_INJECTION_ENABLED=false`), wait for the rollout, then `--resume $RID`. Resuming before the 30 second lease expires returns `409`. (A running request keeps renewing its lease, so only a crashed one expires.)
 
 Inspect the table directly with `uv run app/inspect_audit.py --session-id <Session value> [--request-id <id> --records]`.
 

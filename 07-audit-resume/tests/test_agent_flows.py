@@ -173,6 +173,17 @@ class Harness:
         return [(r["agent_id"], r["type"]) for r in self.records(request_id)]
 
 
+class ReasoningConfigTests(unittest.TestCase):
+    def test_reasoning_is_off_by_default_and_configures_thinking_when_enabled(self) -> None:
+        with patch.dict(os.environ, {"ENABLE_REASONING": "false"}):
+            self.assertEqual(mortgage_agent._supervisor_model(), mortgage_agent.MODEL_ID)
+        with patch.dict(os.environ, {"ENABLE_REASONING": "true"}):
+            model = mortgage_agent._supervisor_model()
+        fields = model.get_config()["additional_request_fields"]
+        self.assertEqual(fields["thinking"]["type"], "enabled")
+        self.assertGreater(fields["thinking"]["budget_tokens"], 1000)
+
+
 class AgentFlowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -286,6 +297,23 @@ class AgentFlowTests(unittest.TestCase):
         self.h.orchestrator.run_agent = real_run
         done = self.h.orchestrator.decide(ACTOR, SESSION, "req-6", decision)
         self.assertEqual(done.status, COMPLETED)
+
+    def test_lease_is_kept_alive_while_the_agent_runs(self) -> None:
+        seen = {}
+        real_run = self.h.orchestrator.run_agent
+
+        def slow_run(*args):
+            import time
+
+            time.sleep(0.4)
+            lock = self.h.store.get(f"user/{ACTOR}", f"lock/{SESSION}")
+            seen["expires"] = lock["lease_expires_at"]
+            return real_run(*args)
+
+        self.h.orchestrator.executions.lease_seconds = 1
+        self.h.orchestrator.run_agent = slow_run
+        self.h.orchestrator.invoke(ACTOR, SESSION, "req-9", "What is my balance?")
+        self.assertIn("expires", seen)
 
     def test_new_request_waits_while_another_is_paused(self) -> None:
         self.h.orchestrator.invoke(ACTOR, SESSION, "req-7", "Please apply now")
