@@ -90,14 +90,18 @@ class CreditScoreMCPTests(unittest.TestCase):
             with credit_score_mcp.credit_score_tool():
                 self.fail("Unexpected tool contract should not be yielded")
 
+    @patch("mortgage_agent.share_interrupts")
+    @patch("mortgage_agent.get_knowledge_base_id", return_value="kb-test")
+    @patch("mortgage_agent.create_memory_manager", return_value="memory-manager")
+    @patch("mortgage_agent.create_session_manager", return_value="session-manager")
     @patch("mortgage_agent.Agent")
-    @patch("mortgage_agent.create_memory_components")
-    def test_supervisor_registers_remote_tool_with_existing_tools(
+    def test_supervisor_registers_specialists_as_tools_with_persistent_context(
         self,
-        memory_components,
         agent_class,
+        session_manager,
+        memory_manager,
+        *_,
     ) -> None:
-        memory_components.return_value = ("session-manager", "memory-manager")
         remote_tool = object()
 
         mortgage_agent.create_supervisor_agent(
@@ -110,9 +114,16 @@ class CreditScoreMCPTests(unittest.TestCase):
         tools = agent_class.call_args.kwargs["tools"]
         self.assertEqual(len(tools), 5)
         self.assertIs(tools[-1], remote_tool)
-        self.assertIn(mortgage_agent.answer_general_mortgage_questions, tools)
-        self.assertIn(mortgage_agent.answer_existing_mortgage_questions, tools)
-        self.assertIn(mortgage_agent.answer_new_loan_application_questions, tools)
+        agent_ids = [call.kwargs["agent_id"] for call in agent_class.call_args_list]
+        self.assertEqual(
+            sorted(agent_ids),
+            ["existing", "general", "new_application", "supervisor"],
+        )
+        as_tool_calls = agent_class.return_value.as_tool.call_args_list
+        self.assertEqual(len(as_tool_calls), 3)
+        for call in as_tool_calls:
+            self.assertIs(call.kwargs["preserve_context"], True)
+        self.assertEqual(agent_class.call_args.kwargs["agent_id"], "supervisor")
         self.assertEqual(
             agent_class.call_args.kwargs["trace_attributes"],
             {
@@ -121,10 +132,9 @@ class CreditScoreMCPTests(unittest.TestCase):
                 "tags": ["mortgage-assistant", "request:request-1"],
             },
         )
-        memory_components.assert_called_once_with(
-            actor_id="participant-1",
-            session_id="session-1",
-        )
+        # Every agent gets its own session manager so each keeps its own conversation.
+        self.assertEqual(session_manager.call_count, 4)
+        memory_manager.assert_called_once_with("participant-1")
 
     def test_supervisor_prompt_has_credit_and_memory_safety_policy(self) -> None:
         policy = mortgage_agent.SUPERVISOR_PROMPT.lower()
@@ -160,9 +170,10 @@ class CreditScoreMCPTests(unittest.TestCase):
             def __exit__(self, *_):
                 context_active["value"] = False
 
-        def invoke(prompt: str) -> str:
+        def invoke(prompt: str, **kwargs) -> str:
             self.assertTrue(context_active["value"])
             self.assertEqual(prompt, "Get my credit score")
+            self.assertEqual(kwargs["invocation_state"]["request_id"], "request-1")
             return "score response"
 
         tool_context.return_value = ToolContext()

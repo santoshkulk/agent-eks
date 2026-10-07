@@ -1,55 +1,27 @@
 """Export Strands agent traces to a self-hosted Langfuse instance over OTLP/HTTP.
 
 This module configures OpenTelemetry exactly once per process, as early as
-possible, using Strands Agents' native OTLP integration
-(https://strandsagents.com/docs/user-guide/observability-evaluation/traces/).
-There is a single exporter configuration; there is no separate console
-exporter, X-Ray exporter, or second tracer provider anywhere in the
-application.
+possible, using Strands Agents' native OTLP integration. There is one exporter
+configuration and no separate console or X-Ray exporter.
 
-Configuration is entirely environment-driven and optional:
-
-- OTEL_EXPORTER_OTLP_ENDPOINT   Langfuse OTLP/HTTP endpoint, for example
-                                 http://<langfuse-host>:3000/api/public/otel/v1/traces
-- OTEL_EXPORTER_OTLP_HEADERS    "Authorization=Basic <base64>,x-langfuse-ingestion-version=4"
-- OTEL_SERVICE_NAME             Resource service name (default: mortgage-assistant)
-- TELEMETRY_MASK_CONTENT        "true" to redact prompt/response attribute
-                                 values before spans are exported (see below)
-
-If OTEL_EXPORTER_OTLP_ENDPOINT is not set, tracing is disabled entirely: no
-exporter is created and no network calls are attempted. Any failure while
-configuring or using telemetry is logged and swallowed; it never blocks
-request handling or readiness.
-
-Prompt and response capture
-----------------------------
-Strands' automatic instrumentation records prompt and response text as span
-attributes such as `gen_ai.user.message`, `gen_ai.assistant.message`,
-`gen_ai.choice`, and `system_prompt`. Those attributes are visible in
-Langfuse alongside latency, token usage, and tool calls. For this workshop's
-mock data that visibility is the point of the lab. A deployment handling real
-customer data should choose one of:
-
-- Leave OTEL_EXPORTER_OTLP_ENDPOINT unset to disable tracing entirely.
-- Set TELEMETRY_MASK_CONTENT=true so this module strips the prompt/response
-  attribute values (see `_CONTENT_ATTRIBUTES`) before any span leaves the
-  process. Latency, token counts, tool names, and error status are still
-  exported; the conversational content is not.
-- Apply redaction or access controls further downstream in the
-  observability backend instead of, or in addition to, the above.
+Configuration is environment-driven and optional. If
+OTEL_EXPORTER_OTLP_ENDPOINT is unset, tracing is disabled without making
+network calls. Telemetry failures are logged and never block request handling
+or readiness.
 """
 
 from __future__ import annotations
 
 import contextvars
+from collections.abc import Iterator
 import logging
 import os
 import typing
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from types import TracebackType
 
 from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 
@@ -60,6 +32,13 @@ _trace_attributes_var: contextvars.ContextVar[dict[str, object] | None] = (
 )
 
 _CONTENT_ATTRIBUTES = (
+    # Current OpenTelemetry semantic conventions emitted by Strands.
+    "gen_ai.input.messages",
+    "gen_ai.output.messages",
+    "gen_ai.system_instructions",
+    "gen_ai.tool.call.arguments",
+    "gen_ai.tool.call.result",
+    # Legacy names retained for compatibility with older Strands traces.
     "gen_ai.user.message",
     "gen_ai.assistant.message",
     "gen_ai.choice",
@@ -67,6 +46,22 @@ _CONTENT_ATTRIBUTES = (
     "gen_ai.choice.tool.result",
     "system_prompt",
 )
+
+_GENERIC_CONTENT_ATTRIBUTES = frozenset(
+    {"content", "message", "query", "results"}
+)
+
+
+def _redact_attributes(
+    attributes: typing.Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Copy attributes while masking known conversational and memory content."""
+    redacted = dict(attributes or {})
+    for key in redacted:
+        if key in _CONTENT_ATTRIBUTES or key in _GENERIC_CONTENT_ATTRIBUTES:
+            redacted[key] = "[redacted]"
+    return redacted
+
 
 _initialized = False
 _tracer = trace.get_tracer(__name__)
@@ -88,43 +83,37 @@ def _parse_headers(raw: str) -> dict[str, str]:
 
 
 class _RedactingSpanExporter(SpanExporter):
-    """Wrap a real span exporter, redacting prompt/response attributes.
-
-    A `SpanProcessor.on_end` hook cannot do this redaction: once a span has
-    ended, the OTel SDK makes its `ReadableSpan.attributes` immutable (item
-    assignment raises `TypeError`), specifically so processors only read
-    finished spans rather than mutate them. Wrapping the exporter instead
-    rebuilds each span with masked attribute values -- using only public
-    `ReadableSpan` fields -- immediately before the real exporter turns it
-    into an OTLP request; this is the last point before the data leaves the
-    process. Never raises; a failure to redact must not prevent export or
-    crash the process.
-    """
+    """Wrap an exporter and redact conversational span attributes."""
 
     def __init__(self, wrapped: SpanExporter) -> None:
         self._wrapped = wrapped
 
     def export(self, spans: typing.Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._wrapped.export([self._redact(span) for span in spans])
+        redacted_spans = [
+            redacted
+            for span in spans
+            if (redacted := self._redact(span)) is not None
+        ]
+        return self._wrapped.export(redacted_spans)
 
-    def _redact(self, span: ReadableSpan) -> ReadableSpan:
+    def _redact(self, span: ReadableSpan) -> ReadableSpan | None:
         try:
-            attributes = dict(span.attributes or {})
-        except Exception:
-            return span
-        if not any(key in attributes for key in _CONTENT_ATTRIBUTES):
-            return span
-        for key in _CONTENT_ATTRIBUTES:
-            if key in attributes:
-                attributes[key] = "[redacted]"
-        try:
+            attributes = _redact_attributes(span.attributes)
+            events = tuple(
+                Event(
+                    name=event.name,
+                    attributes=_redact_attributes(event.attributes),
+                    timestamp=event.timestamp,
+                )
+                for event in span.events
+            )
             return ReadableSpan(
                 name=span.name,
                 context=span.context,
                 parent=span.parent,
                 resource=span.resource,
                 attributes=attributes,
-                events=span.events,
+                events=events,
                 links=span.links,
                 kind=span.kind,
                 status=span.status,
@@ -133,8 +122,11 @@ class _RedactingSpanExporter(SpanExporter):
                 instrumentation_scope=getattr(span, "instrumentation_scope", None),
             )
         except Exception:
-            logger.debug("Unable to redact span %s; exporting it unmasked.", span.name)
-            return span
+            logger.exception(
+                "Dropping span %s because content masking failed",
+                span.name,
+            )
+            return None
 
     def shutdown(self) -> None:
         self._wrapped.shutdown()
@@ -144,6 +136,19 @@ class _RedactingSpanExporter(SpanExporter):
         if callable(force_flush):
             return bool(force_flush(timeout_millis))
         return True
+
+
+def _enable_native_strands_redaction() -> None:
+    """Tell pinned Strands to redact every sensitive GenAI field at source."""
+    key = "OTEL_SEMCONV_STABILITY_OPT_IN"
+    tokens = [
+        token.strip()
+        for token in os.environ.get(key, "").split(",")
+        if token.strip()
+        and not token.strip().startswith("gen_ai_unredacted_attributes=")
+    ]
+    tokens.append("gen_ai_unredacted_attributes=")
+    os.environ[key] = ",".join(tokens)
 
 
 def init_telemetry() -> None:
@@ -159,28 +164,17 @@ def init_telemetry() -> None:
         return
 
     try:
+        if _mask_content_enabled():
+            _enable_native_strands_redaction()
+
         from strands.telemetry import StrandsTelemetry
 
         tracer_provider = TracerProvider()
-
-        # Passing a pre-built tracer_provider makes StrandsTelemetry skip its
-        # own global registration step, so it must be registered here
-        # instead. Both Strands' own agent/model/tool instrumentation and
-        # this module's start_request_span() look up the tracer through
-        # opentelemetry.trace's global provider, not through the local
-        # `tracer_provider` variable; without this call neither one would
-        # ever reach the OTLP exporter attached below.
         trace.set_tracer_provider(tracer_provider)
 
         strands_telemetry = StrandsTelemetry(tracer_provider=tracer_provider)
         headers = _parse_headers(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""))
         if _mask_content_enabled():
-            # StrandsTelemetry.setup_otlp_exporter() only builds an
-            # unwrapped OTLPSpanExporter, with no hook to redact attributes
-            # first. Constructing the same exporter here and wrapping it in
-            # _RedactingSpanExporter is the only way to mask content before
-            # it leaves the process; see that class's docstring for why a
-            # SpanProcessor cannot do this instead.
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
             )
@@ -203,13 +197,7 @@ def trace_attributes(
     session_id: str,
     request_id: str,
 ) -> dict[str, object]:
-    """Build the Strands `trace_attributes` mapping used by every agent.
-
-    Applying the same mapping to the supervisor and every specialist agent
-    keeps actor/session grouping consistent across the whole request, and
-    across both EKS replicas, since grouping in Langfuse is derived from
-    these span attributes rather than from any in-process state.
-    """
+    """Build the trace attributes shared by every agent in one request."""
     return {
         "session.id": session_id,
         "user.id": actor_id,
@@ -218,24 +206,27 @@ def trace_attributes(
 
 
 def set_current_trace_attributes(attributes: dict[str, object] | None) -> None:
-    """Store this request's trace attributes for the current task/thread.
-
-    Specialist agents are created inside `@tool` functions, which only
-    receive the arguments the supervisor's model chooses to pass. This
-    context variable is how those functions recover the actor/session/
-    request attributes for the request they are part of, without needing
-    them threaded through every tool signature.
-    """
+    """Replace request trace attributes for the current context."""
     _trace_attributes_var.set(attributes)
 
 
+@contextmanager
+def use_trace_attributes(attributes: dict[str, object]) -> Iterator[None]:
+    """Install request attributes temporarily and always restore the context."""
+    token = _trace_attributes_var.set(attributes)
+    try:
+        yield
+    finally:
+        _trace_attributes_var.reset(token)
+
+
 def current_trace_attributes() -> dict[str, object] | None:
-    """Return the trace attributes set by `set_current_trace_attributes`."""
+    """Return trace attributes for the current request context."""
     return _trace_attributes_var.get()
 
 
 def current_trace_id() -> str | None:
-    """Return the 32-hex-character trace ID of the active span, if any."""
+    """Return the active span's 32-character hexadecimal trace ID."""
     context = trace.get_current_span().get_span_context()
     if context is None or context.trace_id == 0:
         return None
@@ -243,14 +234,7 @@ def current_trace_id() -> str | None:
 
 
 class _SafeSpan(AbstractContextManager):
-    """Start a span without letting telemetry errors reach the caller.
-
-    `__enter__` never raises: if starting the span fails, it logs and yields
-    `None` so callers can proceed without tracing. `__exit__` delegates to
-    the real span's exit so exceptions raised by the caller's own code are
-    never suppressed, but any error while closing the span itself is caught
-    and logged instead of replacing the caller's exception.
-    """
+    """Start a span without allowing telemetry errors to reach callers."""
 
     def __init__(self, name: str, attributes: dict[str, object] | None = None) -> None:
         self._name = name
@@ -292,19 +276,12 @@ def start_request_span(
     name: str,
     attributes: dict[str, object] | None = None,
 ) -> _SafeSpan:
-    """Start a root span for one API request.
-
-    Safe to use even if tracing was never configured: OpenTelemetry's
-    default no-op tracer still yields a valid, non-recording span object in
-    that case, so callers can set attributes on it unconditionally. Nothing
-    is exported and no network calls are made unless `init_telemetry` set up
-    a real exporter first.
-    """
+    """Start a safe root span for one API request."""
     return _SafeSpan(name, attributes)
 
 
 def record_fault_injection(tool_name: str, mode: str) -> None:
-    """Add a visible marker to the active span when a fault is injected."""
+    """Add a marker to the active span when a test fault is injected."""
     try:
         trace.get_current_span().add_event(
             "fault_injection",

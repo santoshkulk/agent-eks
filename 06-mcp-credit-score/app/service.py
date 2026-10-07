@@ -1,0 +1,264 @@
+"""Request orchestration: lease, audit trail, resume, and approval handling.
+
+The HTTP layer calls ``Orchestrator.invoke`` and ``Orchestrator.decide``. Both take
+the session lease, bind an ``AuditTrail`` for the request, run the supervisor
+(``run_agent``), and record the outcome on the execution record.
+"""
+
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from approvals import normalize_decision
+from audit import (
+    AuditTrail,
+    build_explanation,
+    load_records,
+    use_audit_trail,
+    verify_chain,
+)
+from execution import (
+    CANCELLED,
+    COMPLETED,
+    FAILED,
+    INTERRUPTED,
+    Execution,
+    ExecutionNotFound,
+    ExecutionStore,
+    InvalidExecutionState,
+)
+from store import ItemStore
+
+logger = logging.getLogger("service")
+
+# run_agent(agent_input, actor_id, session_id, request_id) -> AgentResult-like object
+RunAgent = Callable[[Any, str, str, str], Any]
+
+
+@dataclass
+class Outcome:
+    execution: Execution
+    response: str | None = None
+    interrupts: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def status(self) -> str:
+        return self.execution.status
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        store: ItemStore,
+        run_agent: RunAgent,
+        specialist_tools: frozenset[str] | set[str],
+        executions: ExecutionStore | None = None,
+        reset_agents: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self.store = store
+        self.run_agent = run_agent
+        self.reset_agents = reset_agents
+        self.specialist_tools = set(specialist_tools)
+        self.executions = executions or ExecutionStore(store)
+
+    # -- invoke / resume ------------------------------------------------------
+    def invoke(
+        self,
+        actor_id: str,
+        session_id: str,
+        request_id: str,
+        prompt: str,
+        trace_id: str | None = None,
+    ) -> Outcome:
+        execution = self.executions.begin(
+            actor_id, session_id, request_id, prompt, trace_id=trace_id
+        )
+        if execution.mode == "replay":
+            return Outcome(execution, response=execution.response)
+        if execution.mode == "pending_approval":
+            return Outcome(execution, interrupts=execution.interrupts)
+        return self._run(execution, prompt.strip(), trace_id)
+
+    def decide(
+        self,
+        actor_id: str,
+        session_id: str,
+        request_id: str,
+        decisions: list[dict[str, Any]],
+        trace_id: str | None = None,
+    ) -> Outcome:
+        """Apply reviewer decisions to an INTERRUPTED request and continue it."""
+        current = self.executions.get(actor_id, session_id, request_id)
+        if current is None:
+            raise ExecutionNotFound(f"no execution {request_id}")
+        pending = {item["id"] for item in current.interrupts}
+        answered = {item["interrupt_id"] for item in decisions}
+        if len(answered) != len(decisions):
+            raise InvalidExecutionState("each pending approval must be answered exactly once")
+        if not ExecutionStore._awaiting_approval(current):
+            raise InvalidExecutionState(
+                f"execution {request_id} is {current.status}, not awaiting approval"
+            )
+        if answered != pending:
+            raise InvalidExecutionState(
+                f"decisions must answer exactly the pending approvals: {sorted(pending)}"
+            )
+        responses = [
+            {
+                "interruptResponse": {
+                    "interruptId": item["interrupt_id"],
+                    "response": normalize_decision(item),
+                }
+            }
+            for item in decisions
+        ]
+        execution = self.executions.begin_approval(actor_id, session_id, request_id, trace_id)
+        return self._run(execution, responses, trace_id, decisions=decisions)
+
+    @staticmethod
+    def _anchor(execution: Execution, trail: AuditTrail) -> None:
+        execution.audit_count = trail.count
+        execution.audit_head = trail.head
+
+    def _finalize(self, action: Callable[[], Any]) -> None:
+        """Retry the closing write: the agent already ran, so losing it would force a replay."""
+        for attempt in range(4):
+            try:
+                action()
+                return
+            except Exception:
+                if attempt == 3:
+                    raise
+                logger.exception("Could not record the execution outcome; retrying")
+                time.sleep(0.5 * (2**attempt))
+
+    def _run(
+        self,
+        execution: Execution,
+        agent_input: Any,
+        trace_id: str | None,
+        decisions: list[dict[str, Any]] | None = None,
+    ) -> Outcome:
+        try:
+            trail = AuditTrail(
+                self.store,
+                execution.actor_id,
+                execution.session_id,
+                execution.request_id,
+                attempt=execution.attempt,
+                trace_id=trace_id or execution.trace_id,
+            )
+        except Exception as error:
+            message = f"AuditUnavailable: {error}"
+            if execution.mode == "approval":
+                # The agents are still paused: let the reviewer resubmit the decisions.
+                self.executions.interrupt(execution, execution.interrupts, error=message)
+            else:
+                self.executions.fail(execution, message)
+            raise
+
+        with use_audit_trail(trail):
+            trail.record(
+                "execution_start",
+                "api",
+                {
+                    "mode": execution.mode,
+                    "attempt": execution.attempt,
+                    "prompt": execution.prompt,
+                    "decisions": decisions,
+                },
+            )
+            try:
+                with self.executions.heartbeat(
+                    execution, on_lost=lambda: setattr(trail, "lease_lost", True)
+                ) as heartbeat:
+                    result = self.run_agent(
+                        agent_input,
+                        execution.actor_id,
+                        execution.session_id,
+                        execution.request_id,
+                    )
+                if heartbeat.lost:
+                    trail.record(
+                        "lease_lost",
+                        "api",
+                        {"note": "another worker may have taken over this session"},
+                    )
+            except BaseException as error:
+                # BaseException too: aborted requests must be recorded and resumable.
+                trail.record(
+                    "execution_failed",
+                    "api",
+                    {"error_type": type(error).__name__, "error": str(error)},
+                )
+                message = f"{type(error).__name__}: {error}"
+                self._anchor(execution, trail)
+                if execution.mode == "approval":
+                    # The agents are still paused: let the reviewer resubmit the decisions.
+                    self.executions.interrupt(execution, execution.interrupts, error=message)
+                else:
+                    self.executions.fail(execution, message)
+                raise
+
+            if getattr(result, "stop_reason", None) == "interrupt":
+                interrupts = [
+                    {"id": item.id, "name": item.name, "reason": item.reason}
+                    for item in (result.interrupts or [])
+                ]
+                trail.record("execution_interrupted", "api", {"interrupts": interrupts})
+                self._anchor(execution, trail)
+                self._finalize(lambda: self.executions.interrupt(execution, interrupts))
+                return Outcome(execution, interrupts=interrupts)
+
+            response = str(result)
+            trail.record(
+                "execution_completed",
+                "api",
+                {"response": response, "dropped_records": trail.dropped},
+            )
+            self._anchor(execution, trail)
+            self._finalize(lambda: self.executions.complete(execution, response))
+            return Outcome(execution, response=response)
+
+    def cancel(self, actor_id: str, session_id: str, request_id: str) -> Execution:
+        """Abandon a stuck or unwanted paused request so the session can continue."""
+        execution = self.executions.abandon(actor_id, session_id, request_id)
+        if self.reset_agents is not None:
+            self.reset_agents(actor_id, session_id)
+        trail = AuditTrail(self.store, actor_id, session_id, request_id, attempt=execution.attempt)
+        trail.record("execution_cancelled", "api", {})
+        return self.executions.set_anchor(execution, trail.count, trail.head)
+
+    # -- read side --------------------------------------------------------------
+    def trail(self, actor_id: str, session_id: str, request_id: str) -> dict[str, Any]:
+        execution = self.executions.get(actor_id, session_id, request_id)
+        if execution is None:
+            raise ExecutionNotFound(f"no execution {request_id}")
+        records = load_records(self.store, actor_id, session_id, request_id)
+        # None while the request is running or for records written before anchors existed.
+        anchor_valid = None
+        if execution.audit_head and execution.status != "RUNNING":
+            anchor_valid = bool(
+                len(records) == execution.audit_count
+                and records
+                and records[-1]["hash"] == execution.audit_head
+            )
+        return {
+            "execution": execution.summary(),
+            "chain_valid": verify_chain(records),
+            "anchor_valid": anchor_valid,
+            "explanation": build_explanation(records, self.specialist_tools),
+            "records": records,
+        }
+
+    def explanation(self, actor_id: str, session_id: str, request_id: str) -> dict[str, Any]:
+        records = load_records(self.store, actor_id, session_id, request_id)
+        return build_explanation(records, self.specialist_tools)
+
+    def session_executions(self, actor_id: str, session_id: str) -> list[dict[str, Any]]:
+        return [item.summary() for item in self.executions.list_session(actor_id, session_id)]
+
+
+__all__ = ["Orchestrator", "Outcome", "CANCELLED", "COMPLETED", "FAILED", "INTERRUPTED"]

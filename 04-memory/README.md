@@ -1,462 +1,88 @@
-# Lab 04: Add durable memory with Strands and Amazon DynamoDB
+# Lab 04: Durable memory, agents-as-tools, and an auditable, resumable mortgage assistant
 
-In this lab, you add short-term and long-term memory to the mortgage
-assistant running on Amazon EKS.
+In this lab, you add short-term and long-term memory to the mortgage assistant
+running on Amazon EKS. You then rebuild its multi-agent design with Strands
+agents-as-tools so that every agent keeps its own durable session, every
+decision and tool call lands in a tamper-evident audit trail, and a request that
+fails, is interrupted, or waits for a human can be resumed.
 
-The implementation follows the architecture described in
+The memory design follows
 [Introducing Strands DynamoDB Storage: Durable Agent Storage for the Strands Agents SDK](https://aws.amazon.com/blogs/database/introducing-strands-dynamodb-storage-durable-agent-storage-for-the-strands-agents-sdk/).
-It does not use Amazon Bedrock AgentCore.
+It does not use Amazon Bedrock AgentCore. This lab is a self-contained
+checkpoint: it does not import code from other lab directories.
 
 ## Learning objectives
 
 After completing this lab, you will be able to:
 
-- Explain the difference between short-term session state and long-term memory.
-- Persist Strands session snapshots in DynamoDB.
-- Store and semantically retrieve durable user preferences.
-- Scope memory by actor and session.
-- Resume a conversation after an EKS pod is replaced.
-- Recall a preference from a new conversation.
-- Verify that one actor cannot retrieve another actor's memories.
-- Inspect the DynamoDB records used by the agent.
-- Distinguish production-aligned design patterns from workshop simplifications.
-- Trace session restoration and memory retrieval across the complete EKS request path.
+| Area | You will be able to |
+| --- | --- |
+| Memory | Explain short-term session state versus long-term memory, store and semantically retrieve durable preferences, scope them by actor and session, and prove that one actor cannot recall another's memories. |
+| Orchestration | Describe the agent-as-tool pattern: a supervisor delegating to specialists that are real `Agent` objects, each with its own persistent session. |
+| Persistence | Resume a conversation after an EKS pod is replaced, and inspect the DynamoDB items the agents use. |
+| Audit | Read a hash-chained record of every invocation, model decision, tool call, memory read and write, and approval. |
+| Explainability | See why a request was routed to a specialist and which evidence, memories, and approvals applied. |
+| Resilience | Retry a failed request with `request_id`, roll back an unfinished turn, run a side effect at most once, approve a side effect across a pod restart, and cancel a stuck approval. |
 
 ## Estimated time
 
-Allow approximately 45–60 minutes, including deployment and the memory
-exercises.
-
-## Architecture
-
-Lab 04 keeps the same long-running FastAPI service and EKS routing model from
-Lab 03. It adds short-term and long-term storage components to every newly
-created supervisor agent.
-
-```mermaid
-flowchart TB
-    client["Participant laptop<br/>stateful Python client"]
-
-    subgraph account["Workshop AWS account"]
-        nlb["Internet-facing Network Load Balancer<br/>port 80 and source-CIDR filter"]
-
-        subgraph eks["Existing Amazon EKS cluster"]
-            controller["AWS Load Balancer Controller<br/>kube-system namespace"]
-            subgraph namespace["mortgage-assistant namespace"]
-                service["Kubernetes Service<br/>type: LoadBalancer"]
-                deployment["Kubernetes Deployment<br/>desired replicas: 2"]
-                secret["Kubernetes Secret<br/>workshop API key"]
-                serviceAccount["Kubernetes ServiceAccount<br/>mortgage-assistant"]
-
-                subgraph pod1["Memory-enabled application pod 1"]
-                    uvicorn1["Uvicorn HTTP server"] --> fastapi1["FastAPI application"]
-                    fastapi1 --> agent1["New Strands supervisor<br/>for each request"]
-                    agent1 --> session1["SnapshotSessionManager"]
-                    agent1 --> memory1["MemoryManager"]
-                end
-
-                subgraph pod2["Memory-enabled application pod 2"]
-                    uvicorn2["Uvicorn HTTP server"] --> fastapi2["FastAPI application"]
-                    fastapi2 --> agent2["New Strands supervisor<br/>for each request"]
-                    agent2 --> session2["SnapshotSessionManager"]
-                    agent2 --> memory2["MemoryManager"]
-                end
-
-                deployment -.->|creates and replaces| uvicorn1
-                deployment -.->|creates and replaces| uvicorn2
-                service -->|"route to a ready pod:8080"| uvicorn1
-                service -->|"route to a ready pod:8080"| uvicorn2
-                secret -.->|bearer key| fastapi1
-                secret -.->|bearer key| fastapi2
-                serviceAccount -.->|assigned to pod| uvicorn1
-                serviceAccount -.->|assigned to pod| uvicorn2
-            end
-        end
-
-        podIdentity["EKS Pod Identity association<br/>temporary IAM credentials"]
-        ssm["AWS Systems Manager Parameter Store<br/>Knowledge Base ID"]
-        model["Amazon Bedrock model"]
-        knowledgeBase["Amazon Bedrock Knowledge Base"]
-        embedding["Titan Text Embeddings V2"]
-
-        subgraph dynamodb["One DynamoDB memory table"]
-            sessions["Short-term session snapshots<br/>actor + session, seven-day TTL"]
-            memories["Durable actor memories<br/>no session TTL"]
-            vector["1,024-dimension vector index<br/>partitioned by actor"]
-            memories -.->|indexed by| vector
-        end
-    end
-
-    client -->|"prompt + actor_id + session_id"| nlb
-    controller -.->|provisions and configures| nlb
-    nlb --> service
-    serviceAccount -.-> podIdentity
-    podIdentity -.->|AWS SDK credentials| agent1
-    podIdentity -.->|AWS SDK credentials| agent2
-    session1 --> sessions
-    session2 --> sessions
-    memory1 --> embedding
-    memory2 --> embedding
-    memory1 --> memories
-    memory2 --> memories
-    memory1 --> vector
-    memory2 --> vector
-    agent1 --> ssm
-    agent2 --> ssm
-    agent1 --> model
-    agent2 --> model
-    agent1 --> knowledgeBase
-    agent2 --> knowledgeBase
-```
-
-The existing Bedrock Knowledge Base and mortgage tools remain unchanged. Lab
-04 updates the same `mortgage-assistant` Deployment and continues to use the
-same Network Load Balancer. Workshop Studio pre-provisions the EKS cluster,
-DynamoDB table, vector index, Pod Identity role, and other shared workshop
-infrastructure. Lab 04 discovers those resources through canonical Systems
-Manager Parameter Store paths.
-
-### Where FastAPI sits in the memory-enabled service
-
-FastAPI still runs inside each application container between Uvicorn and the
-Strands application:
-
-```text
-EKS pod
-└── mortgage-assistant container
-    └── Uvicorn process
-        └── FastAPI application
-            └── newly created Strands supervisor
-                ├── SnapshotSessionManager
-                ├── MemoryManager
-                └── mortgage specialist tools
-```
-
-FastAPI remains long-running even though a new supervisor is created for every
-prompt. It authenticates the workshop request, validates `prompt`,
-`actor_id`, and `session_id`, invokes the agent, translates failures into an
-HTTP response, and exposes Kubernetes health endpoints.
-
-The actor and session values are part of the Lab 04 API because they select the
-DynamoDB namespace to restore. This is suitable for the isolated workshop, but
-a production service must derive the actor from authenticated identity rather
-than trusting a caller-provided value.
-
-### End-to-end memory invocation workflow
-
-The workflow below shows a request that may restore short-term state, search
-long-term memory, call a mortgage tool, and save updated state. Memory search
-and durable memory creation happen only when the supervisor selects those
-capabilities.
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant NLB
-    participant K8s
-    participant API
-    participant Agent
-    participant Session
-    participant Memory
-    participant Embed
-    participant DDB
-    participant Bedrock
-    participant Tools
-
-    User->>NLB: Submit prompt with actor and session IDs
-    NLB->>K8s: Forward allowed request
-    K8s->>API: Route to one ready pod
-    API->>API: Authenticate and validate request
-    API->>Agent: Create supervisor for actor and session
-    Agent->>Session: Initialize session manager
-    Session->>DDB: Read actor and session snapshot
-    DDB-->>Session: Return prior conversation or empty state
-    Session-->>Agent: Restore short term context
-    Agent->>Bedrock: Process prompt with restored context
-    Bedrock-->>Agent: Return response or capability choice
-
-    opt Search durable memory
-        Agent->>Memory: Search memory for current request
-        Memory->>Embed: Embed semantic query
-        Embed-->>Memory: Return vector
-        Memory->>DDB: Search vector index for actor
-        DDB-->>Memory: Return relevant preferences
-        Memory-->>Agent: Add memories to context
-        Agent->>Bedrock: Continue with retrieved memory
-        Bedrock-->>Agent: Return next response or tool choice
-    end
-
-    opt Use mortgage knowledge or a calculation
-        Agent->>Tools: Invoke selected specialist or tool
-        Tools-->>Agent: Return grounded result
-        Agent->>Bedrock: Compose user response
-        Bedrock-->>Agent: Return final answer
-    end
-
-    opt Save a permitted preference
-        Agent->>Memory: Save approved preference
-        Memory->>Embed: Embed preference
-        Embed-->>Memory: Return vector
-        Memory->>DDB: Write durable memory and vector
-        DDB-->>Memory: Confirm write
-    end
-
-    Agent->>Session: Persist updated conversation
-    Session->>DDB: Write session state with TTL
-    DDB-->>Session: Confirm write
-    Agent-->>API: Return response text
-    API-->>K8s: Return JSON response
-    K8s-->>NLB: Return HTTP response
-    NLB-->>User: Return result
-```
-
-A later prompt can be routed to either replica. The selected pod creates a new
-agent and restores the same session and actor memory from DynamoDB, so pod
-replacement and rolling deployment do not erase the conversation.
-
-## Memory concepts
-
-### Short-term memory
-
-Short-term memory is the conversation associated with one session. It lets
-the assistant understand follow-up questions such as:
-
-```text
-User: I am considering a property worth $600,000.
-User: What property value did I mention?
-```
-
-`SnapshotSessionManager` writes a snapshot after every invocation. A new
-agent process with the same actor and session IDs restores that snapshot.
-
-Short-term records use a seven-day DynamoDB TTL by default. The application
-filters expired records immediately, while DynamoDB removes them
-asynchronously.
-
-### Long-term memory
-
-Long-term memory contains durable facts that remain relevant across
-sessions. Examples include:
-
-- Preferred mortgage term.
-- Fixed or variable-rate preference.
-- Approximate property-price range.
-- Deposit goal.
-- Monthly-payment priority.
-- Refinancing objective.
-- Application timeline.
-
-The Strands `MemoryManager` gives the supervisor `search_memory` and
-`add_memory` capabilities. Durable memories are embedded with Amazon Titan
-Text Embeddings V2 and stored in the same DynamoDB table. Future prompts are
-embedded and compared through a DynamoDB vector index.
-
-Long-term memories do not use the short-term session TTL.
-
-## Actor and session IDs
-
-Every API request includes:
-
-```json
-{
-  "prompt": "What did I tell you?",
-  "actor_id": "participant-123456789012",
-  "session_id": "session-6e18ca6d-..."
-}
-```
-
-### Actor ID
-
-The client derives the default actor from the current AWS account:
-
-```text
-participant-<AWS-account-id>
-```
-
-Each workshop participant has an isolated AWS account and DynamoDB table.
-The actor ID still provides a useful application-level memory namespace and
-allows this lab to demonstrate actor isolation.
-
-For a production application, derive the actor from an authenticated user
-identity. Do not trust an arbitrary actor ID supplied by an unauthenticated
-caller.
-
-### Session ID
-
-The client generates a UUID on the first invocation and stores it in:
-
-```text
-04-memory/.workshop/client-state.json
-```
-
-Normal invocations reuse the current session. `--new-session` creates a new
-conversation while retaining the same actor.
-
-Display the current values:
-
-```bash
-uv run app/invoke_eks.py --show-context
-```
-
-The `.workshop` directory is excluded from source control.
-
-## DynamoDB design
-
-Lab 04 uses one on-demand DynamoDB table with:
-
-- String partition key `pk`.
-- String sort key `sk`.
-- Server-side encryption with the AWS managed KMS key for DynamoDB,
-  `alias/aws/dynamodb`.
-- Point-in-time recovery.
-- TTL enabled on the `expireAt` attribute.
-- A 1,024-dimension cosine vector index.
-- `pk` as the vector search partition.
-
-Workshop Studio provisions this shared infrastructure before participants
-receive their workshop accounts. Lab 04 discovers the table and vector index
-from canonical Parameter Store paths and uses fixed code defaults for the
-agent and embedding models. It only deploys application code.
-
-All data for an actor uses a prefix such as:
-
-```text
-user/participant-123456789012
-```
-
-Example logical keys:
-
-```text
-user/participant-123456789012/session/session-123/...
-user/participant-123456789012/memories/8a1c3f...
-```
-
-Both session and memory operations are scoped to this prefix. Vector searches
-also specify the actor partition, preventing accidental cross-actor recall in
-application code.
-
-The actor partition is not an authorization boundary by itself. The shared
-workshop API key protects the endpoint, while EKS Pod Identity restricts the
-application to the workshop table.
-
-## How the implementation works
-
-### DynamoDB storage
-
-The application creates two views of the same table:
-
-```python
-durable_storage = DynamoDBStorage(
-    table_name,
-    prefix=f"user/{actor_id}",
-)
-
-session_storage = DynamoDBStorage(
-    table_name,
-    prefix=f"user/{actor_id}",
-    ttl_seconds=604800,
-)
-```
-
-The session view applies TTL. The durable view does not.
-
-### Short-term session manager
-
-```python
-session_manager = SnapshotSessionManager(
-    session_id,
-    storage=session_storage,
-)
-```
-
-The manager restores an existing snapshot when the supervisor is created and
-saves a new snapshot after the invocation.
-
-### Long-term memory manager
-
-`app/memory.py` implements a small `DynamoDBMemoryStore` adapter. Its `add`
-method embeds and writes a memory:
-
-```python
-await storage.write(
-    memory_key,
-    content.encode("utf-8"),
-    vector=embed_text(content),
-    metadata=metadata,
-)
-```
-
-Its `search` method embeds a prompt and searches only the current actor's
-partition:
-
-```python
-await storage.search(
-    SearchQuery(
-        vector=embed_text(query),
-        top_k=5,
-        pk=actor_partition,
-        include_values=True,
-    )
-)
-```
-
-The store is connected to the supervisor:
-
-```python
-memory_manager = MemoryManager(
-    stores=[memory_store],
-    add_tool_config=True,
-)
-```
-
-The specialized mortgage subagents remain stateless tools. Memory is applied
-at the user-facing supervisor boundary so one conversation is stored once.
-
-## Memory safety policy
-
-The supervisor is instructed to save only durable mortgage goals and
-preferences. It must not put these values into long-term memory:
-
-- Customer IDs.
-- Account numbers.
-- Authentication data.
-- Exact income.
-- Uploaded documents.
-- Other sensitive financial identifiers.
-
-This workshop uses mock data. Do not enter real personal, financial, or
-customer information.
+Allow about 70 minutes (about 60 without the optional Step 17), including
+deployment, the memory exercises, and the audit and resume exercises. Roughly 30
+minutes of that is reading, 25 is typing commands, and 12 is waiting for
+deployments and rollouts. A first image build with a cold cache adds about 10
+minutes.
+
+## What changed from the previous Lab 04
+
+| Topic | Before | Now |
+| --- | --- | --- |
+| Specialists | Throwaway agents built inside `@tool` functions; only `str(result)` was kept, so their tool calls and history were lost. | Real `Agent`s exposed with `Agent.as_tool(preserve_context=True)`, each with its own `agent_id` and persistent session. |
+| Sessions | One snapshot for the supervisor, saved after each invocation. | One `SnapshotSessionManager` per agent (`supervisor`, `general`, `existing`, `new_application`) under the same `session_id`, saved after every message, plus an immutable snapshot per invocation (`SNAPSHOT_HISTORY`). |
+| Memory writes | Random key per write. | Deterministic key per request and content, with provenance metadata (`request_id`, `session_id`, `actor_id`, `source_agent`, `created_at`), so a retried request overwrites instead of duplicating. |
+| Hooks | None. | Supervisor: `ResumeHook`, `ApprovalHook`, `AuditHook`, `FailFastHook`. Specialists: the first three. |
+| Requests | Fire and forget. | `request_id` idempotency key, execution record, per-session lease with heartbeat, tool ledger, rollback of unfinished turns, human approval, cancel. |
+| API | `POST /invoke` returning `response`. | Adds `status`, `interrupts`, `attempt`, `explanation`, and routes to resume, approve, cancel, and read the audit trail. |
+| Client | `--prompt` and session options. | Adds `--request-id`, `--trail`, `--resume`, `--approve`, `--deny`, `--cancel`, `--reviewer`, `--comment`, `--json`. |
+
+This lab has no tracing: Lab 5 adds OpenTelemetry and Langfuse and attaches trace
+IDs to the same audit records. Lab 6 adds an MCP credit-score tool whose calls
+land in the same audit trail. Audit records and execution summaries already
+carry a `trace_id` field; it stays `null` here.
 
 ## Prerequisites
 
-Open the Workshop Studio environment, complete Labs 01–03, and confirm:
+Complete Labs 00 to 03 in a Workshop Studio environment and confirm:
 
 ```bash
 aws sts get-caller-identity
-
 kubectl get nodes
-
-kubectl get deployment,pods,service \
-  --namespace mortgage-assistant
+kubectl get deployment,pods,service --namespace mortgage-assistant
 ```
 
-You also need:
+You also need `aws` (v2), `kubectl`, `uv`, `curl`, `python3`, `openssl`, `sed`,
+`grep`, Python 3.12 or later, a `docker` CLI that can build and push (Docker, or
+Finch with a `docker` alias; the deploy script falls back to plain `docker
+build` when `buildx` is missing), and Bedrock access for the agent model and
+Titan Text Embeddings V2. With a named AWS profile, pass `--profile` to the
+deploy and inspection scripts (on `invoke_eks.py` it only selects the account
+used to derive the default actor).
 
-- AWS CLI v2.
-- `kubectl`.
-- Docker with Buildx, or Finch's Docker-compatible CLI.
-- `uv`.
-- Python 3.12 or later.
-- Access to the existing EKS cluster and ECR repository.
-- Bedrock model access for the agent model and Titan Text Embeddings V2.
+The deploy script needs the shared cluster, ECR repository, memory table and
+vector index, Knowledge Base, and AWS Load Balancer Controller. It updates the
+Lab 03 Deployment in place and reuses the `mortgage-assistant-api-key` Secret
+when it exists, so do not delete shared resources first. If you removed the
+`mortgage-assistant` namespace, the script recreates it with a new API key.
 
-When using a named AWS profile, pass `--profile` to both deployment and
-client commands.
+**No infrastructure or IAM change is needed:** the pod role already allows
+`GetItem`, `PutItem`, and `Query` on the table. The local utilities use your own
+credentials: `inspect_memory.py` and `hydrate_memory.py` need SSM, STS,
+DynamoDB, and Bedrock (embeddings); `inspect_audit.py` needs
+`ssm:GetParameter`, `sts:GetCallerIdentity`, and DynamoDB `GetItem`/`Query`.
 
-## Workshop Studio resource discovery
+All commands below run from the `04-memory` directory (`cd 04-memory` from the
+repository root).
 
-Workshop Studio pre-provisions shared resources and publishes their identifiers
-in Systems Manager Parameter Store. Lab 04 uses these canonical paths:
+### Workshop Studio resource discovery
 
 | Resource | Parameter Store path |
 |---|---|
@@ -466,606 +92,705 @@ in Systems Manager Parameter Store. Lab 04 uses these canonical paths:
 | DynamoDB vector index name | `/workshop/mortgage-assistant/memory/vector-index-name` |
 | Bedrock Knowledge Base ID | `/workshop/mortgage-assistant/bedrock/knowledge-base-id` |
 
-The deployment and cleanup scripts read these parameters directly and do not
-depend on a CloudFormation stack name or stack outputs. The application keeps
-these model defaults in code:
+The deploy and cleanup scripts read these directly. The agent model
+(`us.anthropic.claude-sonnet-4-6`) and embedding model
+(`amazon.titan-embed-text-v2:0`) are fixed defaults in the deploy script. The
+Python utilities discover the table the same way; `--table-name` (and, for the
+memory tools, `--vector-index-name` and `--embedding-model-id`) override it.
 
-- Agent model: `us.anthropic.claude-sonnet-4-6`.
-- Embedding model: `amazon.titan-embed-text-v2:0`.
+## Architecture
 
-`hydrate_memory.py` and `inspect_memory.py` discover the table and vector index
-through Parameter Store by default. Their `--table-name`,
-`--vector-index-name`, and `--embedding-model-id` options remain available for
-direct CLI overrides.
+Lab 04 keeps the long-running FastAPI service, two-replica Deployment, and NLB
+from Lab 03. For each request FastAPI authenticates the caller, validates
+`prompt`, `actor_id`, `session_id`, and `request_id`, takes one of the pod's
+agent slots, and hands the request to the `Orchestrator`, which owns the lease,
+the audit trail, and the execution record.
+
+```text
+client ─► NLB (port 80, source-CIDR filter) ─► Service ─► pod (Uvicorn ─► FastAPI)
+                                                              │
+POST /invoke ──► Orchestrator (lease, audit trail, status)    │
+                     │                                        │
+                     ▼                                        │
+              supervisor Agent  ── hooks: Resume · Approval · Audit · FailFast
+                │  tools: calculator, search_memory, add_memory (MemoryManager)
+                │
+                ├─ general_mortgage_specialist   ┐  (Knowledge Base `retrieve`)
+                ├─ existing_mortgage_specialist  ├─ Agent.as_tool(preserve_context=True)
+                └─ new_application_specialist    ┘   own agent_id, own snapshot, own hooks,
+                                                      structured SpecialistReport
+All state ─► one DynamoDB table (snapshots, memories + vector index, audit, exec, lock, ledger)
+Models   ─► Bedrock (agent model, Titan embeddings); Pod Identity supplies credentials
+```
+
+- Every `/invoke` creates a new supervisor and three specialist `Agent`
+  objects and discards them afterwards, so pods stay stateless: a later prompt
+  can run on either replica and restore everything from DynamoDB.
+- Each agent has its own `SnapshotSessionManager` under the same `session_id`
+  and a distinct `agent_id`. The new-application specialist now remembers the
+  fields it has already collected.
+- Long-term memory (`MemoryManager`) is attached to the supervisor only, so a
+  durable fact is stored once, at the user-facing boundary.
+- Swarm and Graph were not used: they cannot persist member agents, and
+  `SnapshotSessionManager` rejects multi-agent orchestrators.
+
+### Request flow
+
+The API checks the bearer token and takes an agent slot. The orchestrator takes
+the session lease (a completed `request_id` is replayed here) and opens the audit
+trail. The supervisor restores its snapshot, writes a `Routing rationale:`
+sentence, and may call `search_memory` or `add_memory`; each specialist it calls
+restores its own snapshot and returns a report. Gated tools pause for approval,
+other side-effecting tools run through the ledger, and snapshots save after every
+message. The orchestrator then records `execution_completed`, releases the lease,
+and the API returns the response with an `explanation`.
+
+## Memory concepts
+
+**Short-term memory** is one session's conversation. It lets the assistant
+answer follow-ups ("What property value did I mention?"). Snapshots live in
+DynamoDB with a seven-day TTL; the application filters expired records
+immediately and DynamoDB removes them asynchronously. Each agent has its own
+conversation, so the supervisor and each specialist remember different things.
+
+**Long-term memory** holds durable facts that stay relevant across sessions: a
+preferred term, fixed or variable rate preference, approximate property-price
+range, deposit goal, payment priority, refinancing objective, or timeline. The
+Strands `MemoryManager` gives the supervisor `search_memory` and `add_memory`
+tools. Memories are embedded with Titan Text Embeddings V2 and stored in the same
+table; prompts are embedded and compared through a DynamoDB vector index.
+Long-term memories have no TTL.
+
+**Actor and session IDs.** Every request includes `actor_id` and `session_id`.
+The client derives the default actor as `participant-<AWS-account-id>` and keeps
+a generated session UUID per actor in `04-memory/.workshop/client-state.json`
+(excluded from source control; it also remembers the last request per actor for
+`last`). `--new-session` starts a new conversation for the same actor and
+`--show-context` prints the current values. Each participant has an isolated
+account, but the actor ID still demonstrates application-level isolation. In
+production, derive the actor from an authenticated identity.
+
+## DynamoDB data model
+
+One on-demand table with string keys `pk` and `sk`, encryption with
+`alias/aws/dynamodb`, point-in-time recovery, TTL on `expireAt`, and a
+1,024-dimension cosine vector index partitioned by `pk`. All of an actor's data
+lives under `pk=user/<actor_id>`:
+
+| Sort-key prefix | Contents |
+| --- | --- |
+| `session/<session>/scopes/agent/<agent_id>/snapshots/snapshot_latest.json` | Latest snapshot per agent, saved after every message. TTL `MEMORY_SESSION_TTL_SECONDS` (7 days). |
+| `session/<session>/scopes/agent/<agent_id>/snapshots/immutable_history/...` | One immutable snapshot per invocation (rollback, forensics); `--no-snapshot-history` disables it. Same TTL. |
+| `memories/<key>` | Durable memory text, vector, and metadata. No TTL. |
+| `audit/<session>/<request>/<seq>` | Append-only audit records with `prev_hash` and `hash`. No TTL. |
+| `exec/<session>/<request>` | Execution record: status, attempt, prompt hash, interrupts, response. |
+| `lock/<session>` | Per-session lease (`LEASE_SECONDS`, default 180). |
+| `ledger/<session>/<request>/<tool>/<input-hash>` | Recorded results of side-effecting tools. |
+
+Session and memory operations are scoped to the actor prefix, and vector
+searches pass the actor partition. The partition is not an authorization
+boundary: the shared API key protects the endpoint and Pod Identity restricts
+the application to the workshop table. Audit, execution, lock, and ledger items
+use a small conditional-write helper (`app/store.py`) because `DynamoDBStorage`
+has no conditional writes.
+
+In code, `app/memory.py` builds the session managers with message-level saves and
+an immutable snapshot per invocation:
+
+```python
+SnapshotSessionManager(session_id, storage=session_storage,   # TTL view of the table
+                       save_latest_on="message",
+                       snapshot_trigger=lambda **_: SNAPSHOT_HISTORY)
+```
+
+`DynamoDBMemoryStore.add` derives the key from the request and the text, so a
+retry overwrites instead of duplicating, and writes provenance with the vector;
+`search` queries only the actor's partition (`top_k=MEMORY_MAX_SEARCH_RESULTS`,
+default 5). Both emit `memory_write` / `memory_read` audit records:
+
+```python
+key = sha256(f"{trail.request_id}:{cleaned}")[:32]
+await storage.write(f"memories/{key}", content, vector=embed_text(cleaned),
+                    metadata={**metadata, "request_id": ..., "session_id": ...,
+                              "actor_id": ..., "source_agent": "supervisor", "created_at": ...})
+```
+
+`create_specialist_tool` builds each specialist with its own `agent_id`,
+`structured_output_model=SpecialistReport`, session manager, and hooks, and
+exposes it with `agent.as_tool(preserve_context=True)`.
+
+## Memory safety policy
+
+The supervisor may save only durable mortgage goals and preferences. It must not
+store customer IDs, account numbers, authentication data, exact income, uploaded
+documents, or other sensitive financial identifiers in long-term memory. This is
+a prompt instruction, not a security boundary, and the audit trail and agent
+snapshots do record prompts and tool inputs. Use mock data only: do not enter
+real personal, financial, or customer information.
+
+## Audit trail
+
+`app/audit.py` attaches an `AuditHook` to the supervisor and each specialist. It
+records, tagged with `agent_id`, `request_id`, `attempt`, and `trace_id`:
+
+- `invocation_start` / `invocation_end` (stop reason, token usage, pending interrupts)
+- `decision` (the model's text and chosen tool calls), `model_response`, `model_error`
+- `tool_start` / `tool_call` (inputs, results, status, duration; specialists appear
+  as tools of the supervisor and their own calls appear under their own `agent_id`)
+- `memory_read` (keys and scores retrieved) and `memory_write` (with provenance)
+- `approval`, `rollback`, `ledger_replay`, `ledger_pending`, `lease_lost`,
+  `fault_injection`, and the `execution_*` lifecycle
+
+Records are hash-chained. `GET /executions/{request_id}` returns `chain_valid`,
+false if a record is altered, removed, or reordered, and `anchor_valid`, which compares the
+record count and last hash stored on the execution item when the request stopped, so deleting the
+last records is also detected (`null` while a request is running). Sensitive keys
+(`AUDIT_REDACT_KEYS`) are masked and long values truncated.
+
+If an audit record for a side-effecting tool (`AUDIT_CRITICAL_TOOLS`: by default
+`create_customer_id`, `create_loan_application`, and `add_memory`) cannot be
+written, the tool call is **blocked** (fail closed); these tools are also blocked
+once the session lease is lost. Other records degrade to a logged, dropped
+record, and `execution_completed` carries `dropped_records` so a gap is visible.
+Records over 32 KB keep only a digest and preview (`truncated`). Hash chaining
+makes tampering evident, not impossible: someone with write access to the table can
+rewrite the chain and the anchor together. For production also stream the table to
+S3 with Object Lock and enable CloudTrail data events (neither is provisioned).
+
+## Explainability
+
+- The supervisor writes a `Routing rationale:` sentence before delegating; the
+  audit trail links it to the specialist call it caused.
+- Specialists return `answer`, `rationale`, `evidence`, and `assumptions`; the
+  evidence survives in the audit trail.
+- Every `/invoke` response carries `explanation`: `route`, `tools_used`,
+  `evidence`, `memories_used`, `approvals`, `records`, and `attempts`.
+- `ENABLE_REASONING=true` (`--enable-reasoning`) also captures Bedrock
+  extended-thinking blocks for the supervisor. It is off by default, the budget
+  is fixed at 2048 tokens, and models without thinking support reject the request.
+
+## Resilience and resume
+
+1. **Message-level snapshots** for every agent, plus an immutable snapshot per invocation.
+2. **Unfinished-turn rollback.** `ResumeHook` marks a turn in `agent.state` when
+   it starts and clears it when the invocation ends. If a pod dies or the
+   invocation raises, the next invocation rolls the agent back to the start of
+   that turn so the message list stays valid. The hook also reapplies the
+   current system prompt, which a restored snapshot would otherwise overwrite.
+3. **Idempotent requests.** `request_id` is the idempotency key. Re-sending it
+   replays a completed request and resumes a failed one (`attempt` increments).
+   It returns `409` while the request is running, the session is busy, another
+   request in the session waits for approval, or the ID was used with a
+   different prompt.
+4. **Tool ledger.** `create_customer_id` and `create_loan_application` run at most
+   once per session, request, and input; a retry gets the recorded result. The
+   claim is a conditional write, so two identical parallel calls run the effect
+   once. Memory writes get the same protection from their deterministic key.
+5. **Fail fast.** Strands turns a specialist's exception into an error tool
+   result that a model can paper over with an apology. `FailFastHook`
+   (supervisor only) fails the request instead, so it is resumable.
+6. **Human approval.** `create_loan_application` (configurable with
+   `APPROVAL_REQUIRED_TOOLS`) pauses with a Strands interrupt and `/invoke`
+   returns `202` with the pending approvals. The interrupt is stored in the agent
+   snapshots, so any pod can finish the request after the reviewer answers. If a
+   pod dies while continuing an approval, retrying `/invoke` or `/approvals`
+   returns the pending approval again. If an approval can no longer be completed
+   (for example its snapshots expired), `POST /executions/{id}/cancel` abandons
+   it and clears the paused agents so the session accepts new prompts.
 
 ## Step 1: Review the Lab 04 files
 
-```text
-04-memory/
-├── app/
-│   ├── inspect_memory.py
-│   ├── invoke_eks.py
-│   ├── memory.py
-│   ├── mortgage_agent.py
-│   └── mortgage_api.py
-├── k8s/
-├── scripts/
-│   ├── cleanup-memory.sh
-│   ├── deploy-memory.sh
-│   └── hydrate_memory.py
-├── tests/
-├── Dockerfile
-├── pyproject.toml
-└── uv.lock
-```
-
-Workshop Studio provisions the runtime IAM policy, DynamoDB table, and vector
-index before the lab begins. `hydrate_memory.py` is participant-facing
-test-data tooling; it does not create infrastructure.
+`app/` holds the API (`mortgage_api.py`), orchestration (`service.py`), agents
+and tools (`mortgage_agent.py`), memory (`memory.py`), the resilience modules
+(`audit.py`, `execution.py`, `ledger.py`, `approvals.py`, `resilience.py`,
+`store.py`), the client (`invoke_eks.py`), and `inspect_memory.py` and
+`inspect_audit.py`. `scripts/` holds `deploy-memory.sh`, `cleanup-memory.sh`,
+`check_memory_ready.py` (used by the deploy script), and `hydrate_memory.py`
+(test-data tooling; it creates no infrastructure).
 
 ## Step 2: Test the module locally
 
-From the repository root:
-
 ```bash
-cd 04-memory
-
-uv run python -m unittest discover \
-  --start-directory tests \
-  --verbose
+uv sync --frozen
+uv run python -m unittest discover --start-directory tests --verbose
 ```
 
-The first `uv run` command creates the lab-local environment, installs its
-locked dependencies, and runs the tests. These tests validate the API contract,
-identifier rules, TTL separation, and client session-state behaviour. They do
-not invoke Bedrock or modify AWS.
+The first run installs the locked dependencies (a minute or two). The 109 tests
+do not invoke Bedrock or modify AWS. They cover the API contract, identifier
+rules, TTL separation, client state, audit chaining, leases, the ledger, and
+approvals. `tests/test_agent_flows.py` runs the real supervisor, `as_tool`
+specialists, hooks, snapshots, and orchestrator with a scripted model, covering
+audit and explanation, replay, rollback and resume, approval after the agents
+are rebuilt, and denial.
 
-## Step 3: Deploy the memory-enabled application
-
-```bash
-chmod +x \
-  scripts/deploy-memory.sh \
-  scripts/cleanup-memory.sh \
-  scripts/hydrate_memory.py
-
-./scripts/deploy-memory.sh \
-  --region us-west-2
-```
-
-For a named profile:
+## Step 3: Deploy
 
 ```bash
-./scripts/deploy-memory.sh \
-  --region us-west-2 \
-  --profile YOUR_AWS_PROFILE
+./scripts/deploy-memory.sh --region us-west-2
+./scripts/deploy-memory.sh --region us-west-2 --profile YOUR_AWS_PROFILE   # named profile
 ```
 
-The deployment script:
+The script reads the Parameter Store values, confirms the table and vector index
+are `ACTIVE`, builds and pushes a `lab04-agent-*` image, applies the manifest,
+reuses the API-key Secret, waits for the pods and NLB, and smoke-tests an
+invocation. The smoke test also fetches the audit trail, requires `chain_valid`,
+and replays the `request_id`. It creates no AWS infrastructure.
 
-1. Reads the canonical Workshop Studio Parameter Store values.
-2. Confirms the pre-provisioned memory table and vector index are active.
-3. Uses `us.anthropic.claude-sonnet-4-6` for the agent and
-   `amazon.titan-embed-text-v2:0` for embeddings.
-4. Builds and pushes the Lab 04 image.
-5. Updates the existing EKS Deployment.
-6. Reuses the existing Kubernetes API-key Secret when present.
-7. Waits for the pods and API to become ready.
-8. Sends one smoke-test prompt.
-
-The script does not create or update AWS infrastructure. Workshop Studio
-manages the shared EKS cluster, Knowledge Base, ECR repository, IAM resources,
-DynamoDB table, and vector index.
+| Flag | Effect |
+| --- | --- |
+| `--service-access-cidr CIDR` | Source CIDR for the NLB (default: your public IP `/32`). |
+| `--session-ttl-seconds N` | Short-term retention, at least 3600 (default 604800). |
+| `--approval-required-tools LIST` | Tools that pause for approval (default `create_loan_application`; empty disables). |
+| `--lease-seconds N` | Per-session lease, at least 30 (default 180). |
+| `--enable-reasoning` | Capture Bedrock extended-thinking in the audit trail. |
+| `--no-snapshot-history` | Keep only the latest snapshot per agent. |
+| `--image-uri URI` | Reuse an image already in ECR and skip build and push (about 2 minutes instead of about 12). |
+| `--fault-injection-enabled`, `--fault-injection-tool`, `--fault-injection-mode delay\|error\|abort\|crash`, `--fault-injection-delay-seconds` | Fault-injection exercises. Wired into `get_mortgage_details` only. |
+| `--prompt TEXT` | Smoke-test prompt. |
 
 ## Step 4: Check the deployment
 
 ```bash
-kubectl get deployment,pods,service \
-  --namespace mortgage-assistant
-
-kubectl logs \
-  --namespace mortgage-assistant \
-  deployment/mortgage-assistant \
-  --tail=100
-```
-
-Confirm the memory configuration:
-
-```bash
-kubectl get deployment mortgage-assistant \
-  --namespace mortgage-assistant \
-  --output jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' |
-grep MEMORY
+kubectl get deployment,pods,service --namespace mortgage-assistant
+kubectl logs --namespace mortgage-assistant deployment/mortgage-assistant --tail=100
 ```
 
 ## Step 5: Display your actor and session
 
 ```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
-  --show-context
+uv run app/invoke_eks.py --region us-west-2 --show-context
 ```
-
-Example:
 
 ```text
 Actor:   participant-123456789012
 Session: session-6e18ca6d-70d1-4be5-ae3b-ff4a98b13c3a
 ```
 
-Keep this session for the short-term memory tests.
+Keep this session for the short-term memory tests. Every later client call
+prints these two lines first. Request IDs identify a request: `--prompt` creates
+one for you and remembers it per actor, and `last` means the most recent
+`--prompt`.
 
 ## Step 6: Test short-term memory
 
-Tell the assistant a fact that should remain within the active conversation:
-
 ```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
+uv run app/invoke_eks.py --region us-west-2 \
   --prompt "I am considering a property worth 600,000 dollars."
-```
-
-Ask a follow-up without supplying IDs:
-
-```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
+uv run app/invoke_eks.py --region us-west-2 \
   --prompt "What property value did I mention in this conversation?"
 ```
 
-Expected result:
-
-```text
-The assistant identifies the $600,000 property value.
-```
-
-The client reused the same actor and session, so the newly created supervisor
-restored the DynamoDB snapshot.
+The assistant identifies the $600,000 property value: the client reused the
+actor and session, so a newly created supervisor restored its DynamoDB snapshot.
 
 ## Step 7: Prove the session survives an EKS restart
 
-Restart both EKS replicas:
-
 ```bash
-kubectl rollout restart deployment/mortgage-assistant \
-  --namespace mortgage-assistant
-
-kubectl rollout status deployment/mortgage-assistant \
-  --namespace mortgage-assistant
-```
-
-Ask again using the existing client session:
-
-```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
+kubectl rollout restart deployment/mortgage-assistant --namespace mortgage-assistant
+kubectl rollout status deployment/mortgage-assistant --namespace mortgage-assistant
+uv run app/invoke_eks.py --region us-west-2 \
   --prompt "What property value did I tell you earlier?"
 ```
 
-Expected result:
-
-```text
-The assistant still identifies $600,000.
-```
-
-The previous Python process and EKS pods are gone. The conversation was
-restored from DynamoDB.
+The assistant still identifies $600,000. The previous pods are gone; the
+conversation was restored from DynamoDB.
 
 ## Step 8: Hydrate deterministic test memories
 
-For a predictable long-term-memory test, seed the sample mortgage profile:
-
 ```bash
-uv run scripts/hydrate_memory.py seed \
-  --region us-west-2 \
-  --replace
+uv run scripts/hydrate_memory.py seed --region us-west-2 --replace
+uv run app/inspect_memory.py --region us-west-2 --memories
 ```
 
-The script derives the actor from the participant's AWS account and stores:
-
-- An approximate $600,000 property goal.
-- A preference for a 15-year fixed-rate mortgage.
-- A priority to pay the mortgage off early.
-
-It also waits briefly for the eventually consistent vector index to return the
-hydrated records.
-
-Inspect them:
+The script derives the actor from your AWS account, stores a $600,000 property
+goal, a 15-year fixed-rate preference, and an early-payoff priority, and waits
+briefly for the eventually consistent vector index. Hydrated memories carry no
+provenance metadata; only memories the agent saves do. To clear them:
 
 ```bash
-uv run app/inspect_memory.py \
-  --region us-west-2 \
-  --memories
+uv run scripts/hydrate_memory.py clear --region us-west-2              # memories only
+uv run scripts/hydrate_memory.py clear --region us-west-2 --all-data   # sessions and memories
 ```
 
-Clear only the hydrated long-term memories:
+`--all-data` removes the actor's snapshots and memories (including the conversation you built in
+Steps 5 to 7) but not its audit, execution, lock, or ledger items. If the agent saved a
+preference earlier on its own, `seed --replace` reports removing it.
+
+## Step 9: Let the agent save a long-term preference, with provenance
 
 ```bash
-uv run scripts/hydrate_memory.py clear \
-  --region us-west-2
-```
-
-Clear both sessions and long-term memories for the actor:
-
-```bash
-uv run scripts/hydrate_memory.py clear \
-  --region us-west-2 \
-  --all-data
-```
-
-## Step 9: Let the agent save a long-term preference
-
-Explicitly ask the assistant to remember a durable preference:
-
-```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
+uv run app/invoke_eks.py --region us-west-2 \
   --prompt "Remember for future conversations that I prefer a 15-year fixed-rate mortgage and prioritize paying the loan off early."
+uv run app/inspect_memory.py --region us-west-2 --memories
 ```
 
-Expected result:
-
-```text
-The assistant confirms that it saved the preference.
-```
-
-The supervisor should invoke `add_memory`. The preference is embedded and
-written under the current actor's partition.
-
-Inspect the stored memory:
+The supervisor should call `add_memory` and confirm the save. If nothing appears,
+repeat the prompt with the phrase `Remember for future conversations` and check
+the pod logs. The memory text shows in `inspect_memory.py`; its provenance is in
+the audit record of the request that wrote it:
 
 ```bash
-uv run app/inspect_memory.py \
-  --region us-west-2 \
-  --memories
+uv run app/invoke_eks.py --trail last --json | tail -n +3 | python3 -c \
+  'import json,sys; [print(json.dumps(r["data"], indent=2)) for r in json.load(sys.stdin)["records"] if r["type"]=="memory_write"]'
 ```
 
-If no memory appears, review the pod logs to confirm whether `add_memory` was
-called and repeat the prompt with the explicit phrase `Remember for future
-conversations`.
+Expect `key` (`memories/<hash>`), `content`, `request_id`, `session_id`,
+`actor_id`, `source_agent: supervisor`, and `created_at`. Memory writes are
+idempotent per request: the key derives from the `request_id` and the text, so
+retrying the same request overwrites the memory instead of adding a duplicate.
+Re-sending a completed `request_id` replays the stored response without calling
+the agents.
 
 ## Step 10: Test long-term memory in a new session
 
-Create a new conversation for the same actor:
-
 ```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
-  --new-session \
+uv run app/invoke_eks.py --region us-west-2 --new-session \
   --prompt "What kind of mortgage do I prefer?"
 ```
 
-Expected result:
-
-```text
 The assistant recalls the 15-year fixed-rate preference and early-payoff
-priority.
+priority. The new session has no transcript, so the answer comes from semantic
+long-term memory. To see what was retrieved:
+
+```bash
+uv run app/invoke_eks.py --trail last --json | tail -n +3 | python3 -c \
+  'import json,sys; print(json.dumps(json.load(sys.stdin)["explanation"]["memories_used"], indent=2))'
 ```
 
-The new session has no prior transcript. The answer comes from semantic
-long-term memory.
+`memories_used` lists the retrieved keys, scores (a distance: lower is closer, results are sorted ascending), and content (empty if the model
+did not call `search_memory`).
 
 ## Step 11: Test semantic retrieval
 
-Use different wording from the stored memory:
-
 ```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
-  --new-session \
+uv run app/invoke_eks.py --region us-west-2 --new-session \
   --prompt "Do you remember how quickly I wanted to repay my home loan?"
+uv run app/inspect_memory.py --region us-west-2 --search "preferred repayment period"
 ```
 
-Expected result:
-
-```text
-The assistant connects the question with the remembered preference to pay the
-loan off early.
-```
-
-You can query the vector index directly:
-
-```bash
-uv run app/inspect_memory.py \
-  --region us-west-2 \
-  --search "preferred repayment period"
-```
-
-DynamoDB vector indexes are eventually consistent. The inspection utility
-retries for up to 60 seconds by default.
+The assistant connects the question with the early-payoff preference although
+the wording differs. DynamoDB vector indexes are eventually consistent, so the
+inspection utility retries for up to 60 seconds (`--wait-seconds`).
 
 ## Step 12: Test actor isolation
 
-Select another actor and start a new session:
-
 ```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
-  --actor-id alternate-user \
-  --new-session \
+uv run app/invoke_eks.py --region us-west-2 --actor-id alternate-user --new-session \
   --prompt "What mortgage preferences do you remember about me?"
 ```
 
-Expected result:
-
-```text
-The assistant does not return the default participant's 15-year mortgage
-preference.
-```
-
-Return to the default actor by omitting `--actor-id`:
-
-```bash
-uv run app/invoke_eks.py \
-  --region us-west-2 \
-  --new-session \
-  --prompt "What mortgage term do I prefer?"
-```
+The assistant does not return the default participant's preferences. Omit
+`--actor-id` to return to the default actor.
 
 ## Step 13: Inspect all memory records
 
 ```bash
-uv run app/inspect_memory.py \
-  --region us-west-2
+uv run app/inspect_memory.py --region us-west-2
+uv run app/inspect_memory.py --region us-west-2 --sessions | grep snapshot_latest
+uv run app/inspect_memory.py --region us-west-2 --actor-id alternate-user
 ```
 
-The output separates:
+The output separates short-term records under `session/` from long-term records
+under `memories/`. Each session holds one scope per agent that has run:
+`scopes/agent/supervisor/` plus `general`, `existing`, or `new_application` for
+the specialists the supervisor called. Each scope has a `snapshot_latest` and,
+with `SNAPSHOT_HISTORY`, one immutable snapshot per invocation under
+`immutable_history/`. Audit, execution, lease, and ledger items are not shown
+here; use `inspect_audit.py` (Step 14).
 
-- Short-term session records under `session/`.
-- Long-term records under `memories/`.
-
-Inspect an alternate actor:
+## Step 14: Audit and explain a request
 
 ```bash
-uv run app/inspect_memory.py \
-  --region us-west-2 \
-  --actor-id alternate-user
+uv run app/invoke_eks.py --prompt "What is the balance on customer ID 123456's mortgage?"
+uv run app/invoke_eks.py --trail last
 ```
 
-## API contract
-
-The memory-enabled API requires both identifiers:
+Expect `Request ... COMPLETED (attempt 1), hash chain valid`, a
+`routed to existing_mortgage_specialist: Routing rationale: ...` line, tool calls
+under both `supervisor` and `existing`, and an ordered record list. Add `--json`
+for the full `explanation` block and `chain_valid`. To read the table directly
+with your AWS identity (no API key):
 
 ```bash
+uv run app/inspect_audit.py --region us-west-2 --session-id <Session value>
+uv run app/inspect_audit.py --region us-west-2 --session-id <Session value> --request-id <id> --records
+```
+
+## Step 15: Resume a failed request
+
+Switch the fault on without rebuilding (`abort` fails the whole request after
+`get_mortgage_details` returns):
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=true FAULT_INJECTION_TOOL=get_mortgage_details FAULT_INJECTION_MODE=abort
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+
+RID=demo-$(date +%s)
+# Use a customer ID you have not asked about yet: the specialist remembers earlier answers
+# and would skip the tool (and the fault) for a customer it has already looked up.
+uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 654321's mortgage?"   # HTTP 500
+
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=false FAULT_INJECTION_MODE=delay
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+
+uv run app/invoke_eks.py --resume $RID     # completes as attempt 2
+uv run app/invoke_eks.py --trail $RID
+```
+
+The trail shows attempt 1 with a `fault_injection` record and `execution_failed`,
+then attempt 2 with a `rollback` record and `execution_completed`, all in one
+valid hash chain. The failed attempt's tool results remain in the specialist's
+history, so the final answer may mention the earlier failure. (Rerunning
+`./scripts/deploy-memory.sh --fault-injection-enabled --fault-injection-mode abort --image-uri <image>`
+does the same through the script and also resets any `kubectl set env` changes.)
+
+## Step 16: Approve a side effect, across a restart
+
+```bash
+uv run app/invoke_eks.py --prompt "Start a new application: customer 123456, name Sam, age 30, annual income 90000, annual expenses 40000. Create the application now."
+```
+
+A good response prints `Awaiting approval for:` followed by the gated tool
+(`approve_create_loan_application: {...}`) and `status: awaiting_approval`; the API
+returns HTTP 202 for it.
+If the model asks a follow-up question instead, answer it with another
+`--prompt` until you see the approval request; `--approve` reports "has no
+pending approvals" otherwise.
+
+```bash
+kubectl rollout restart deployment/mortgage-assistant -n mortgage-assistant
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+uv run app/invoke_eks.py --approve last --reviewer pat
+uv run app/invoke_eks.py --trail last      # shows the approval by pat and one create_loan_application call
+```
+
+Until the approval is answered, any other request in the same session returns
+`409`. Use `--deny last --reviewer pat --comment "reason"` to refuse: the tool
+does not run and the model is told it was denied.
+
+**Cancel instead.** Trigger another approval request (use a new customer ID),
+then abandon it and confirm the session accepts prompts again:
+
+```bash
+uv run app/invoke_eks.py --cancel last
+uv run app/invoke_eks.py --prompt "What is a fixed-rate mortgage?"
+```
+
+The request becomes `CANCELLED`, an `execution_cancelled` record is added, and
+the paused agents are cleared.
+
+## Step 17: Optional, crash mid-turn
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=true FAULT_INJECTION_TOOL=get_mortgage_details FAULT_INJECTION_MODE=crash \
+  LEASE_SECONDS=30
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+RID=crash-$(date +%s)
+uv run app/invoke_eks.py --request-id $RID --prompt "What is the balance on customer ID 777001's mortgage?"
+```
+
+The client reports that the connection was closed and the pod restarts
+(`kubectl get pods -n mortgage-assistant` shows `RESTARTS 1`). Turn the fault off
+before resuming, otherwise the retry runs the same tool and crashes the pod again:
+
+```bash
+kubectl set env deployment/mortgage-assistant -n mortgage-assistant \
+  FAULT_INJECTION_ENABLED=false FAULT_INJECTION_MODE=delay LEASE_SECONDS=180
+kubectl rollout status deployment/mortgage-assistant -n mortgage-assistant
+uv run app/invoke_eks.py --resume $RID
+uv run app/invoke_eks.py --trail $RID      # attempt 1 stops mid-turn; the next attempt starts with a rollback record
+```
+
+A resume inside the lease window returns `409` (the dead request still holds the
+session); wait for the lease to expire and retry. A running request keeps
+renewing its lease, so only a crashed one expires.
+
+## API reference
+
+All routes except the health probes require `Authorization: Bearer <key>`.
+`actor_id`, `session_id`, and `request_id` match `^[A-Za-z0-9][A-Za-z0-9._:-]*$`
+(up to 128 characters); `prompt` is 1 to 4000 characters.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /invoke` | `prompt`, `actor_id`, `session_id`, optional `request_id`. `200` completed or replayed, `202` awaiting approval, `409` conflict, `429` all agent slots busy (`Retry-After: 5`), `500` failed (retry with the same `request_id`). |
+| `POST /executions/{request_id}/resume` | `actor_id`, `session_id`. Retry a failed request with its stored prompt (`404` if unknown). |
+| `POST /executions/{request_id}/approvals` | `actor_id`, `session_id`, `decisions: [{interrupt_id, approved, comment, reviewer}]` answering every pending approval exactly once. |
+| `POST /executions/{request_id}/cancel` | `actor_id`, `session_id`. Abandon a stuck or unwanted request (`CANCELLED`); returns the execution summary. `409` if already completed or cancelled. |
+| `GET /executions/{request_id}?actor_id=&session_id=` | `execution` summary, `chain_valid`, `explanation`, and ordered `records` (`404` if unknown). |
+| `GET /sessions/{session_id}/executions?actor_id=` | Execution summaries for a session. |
+| `GET /health`, `GET /health/ready` | Liveness; readiness also reports the Knowledge Base ID, model, memory table, and embedding model. |
+
+To call the API directly, export the endpoint and key first (the client does this
+for you):
+
+```bash
+export MORTGAGE_API_URL="http://$(kubectl get service mortgage-assistant -n mortgage-assistant \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+export MORTGAGE_API_KEY="$(kubectl get secret mortgage-assistant-api-key -n mortgage-assistant \
+  -o jsonpath='{.data.api-key}' | base64 --decode)"
 curl --request POST "$MORTGAGE_API_URL/invoke" \
   --header "Authorization: Bearer $MORTGAGE_API_KEY" \
   --header "Content-Type: application/json" \
-  --data '{
-    "prompt": "What do you remember about my mortgage preference?",
-    "actor_id": "participant-123456789012",
-    "session_id": "session-example"
-  }'
+  --data '{"prompt": "What do you remember about my mortgage preference?",
+           "actor_id": "participant-123456789012", "session_id": "session-example",
+           "request_id": "example-1"}'
 ```
 
-Response:
+The response has `request_id`, `actor_id`, `session_id`, `status` (`completed` or
+`awaiting_approval`), `response`, `interrupts`, `attempt`, `duration_ms`, and
+`explanation`. Execution records use `RUNNING`, `COMPLETED`, `FAILED`,
+`INTERRUPTED`, and `CANCELLED`. Execution summaries expose only the error class,
+but the trail endpoint returns full tool results and prompts.
 
-```json
-{
-  "request_id": "7a6b...",
-  "actor_id": "participant-123456789012",
-  "session_id": "session-example",
-  "response": "...",
-  "duration_ms": 2450
-}
-```
+## Configuration reference
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `MODEL_ID` | `us.anthropic.claude-sonnet-4-6` | Agent model. |
+| `KB_PARAMETER_NAME` | canonical SSM path | Knowledge Base ID lookup. |
+| `MEMORY_TABLE_NAME`, `MEMORY_VECTOR_INDEX_NAME`, `MEMORY_EMBEDDING_MODEL_ID` | from SSM; `amazon.titan-embed-text-v2:0` | Storage and embeddings. |
+| `MEMORY_SESSION_TTL_SECONDS` | `604800` | Snapshot TTL (`--session-ttl-seconds`). |
+| `SNAPSHOT_HISTORY` | `true` | Immutable snapshot per invocation (`--no-snapshot-history`). |
+| `MAX_TOOL_RESULT_CHARS` | `16000` | Longest text a single tool result may add to a conversation; longer results are truncated (a `tool_result_truncated` audit record is written). Each agent's whole conversation is one DynamoDB item (limit 400 KB), so this keeps long sessions saveable. |
+| `APPROVAL_REQUIRED_TOOLS` | `create_loan_application` | Tools that pause for approval. |
+| `LEASE_SECONDS` | `180` | Session lease; the heartbeat renews every third of it. |
+| `ENABLE_REASONING` | `false` | Capture extended thinking. |
+| `FAULT_INJECTION_ENABLED`, `_TOOL`, `_MODE`, `_DELAY_SECONDS` | `false`, `get_mortgage_details`, `delay`, `5` | Fault injection. |
+| `MORTGAGE_API_KEY` | `mortgage-assistant-api-key` Secret | Bearer key. |
+| `AGENT_CONCURRENCY` | `4` | Agent turns per pod. Not in the manifest; set with `kubectl set env`. |
+| `MEMORY_MAX_SEARCH_RESULTS` | `5` | Vector search `top_k`. Not in the manifest. |
+| `AUDIT_CRITICAL_TOOLS` | `create_customer_id,create_loan_application,add_memory` | Tools blocked when their audit record cannot be written. Not in the manifest. |
+| `AUDIT_REDACT_KEYS` | `password,token,authorization,api_key,ssn` | Keys masked in audit records. Not in the manifest. |
+
+## Known limitations
+
+- **The bearer key is an administrator key.** `actor_id`, `session_id`, and the
+  approval `reviewer` are caller-supplied, so anyone holding the key can read any
+  actor's audit trail, approve their own requests, and cancel others'. Audit
+  records are attributable to those claims, not to verified identities.
+  Production needs per-user authentication (for example a JWT subject mapped to
+  `actor_id`) and a four-eyes rule on approvals.
+- **Plain HTTP** through the Network Load Balancer. Put TLS (an ACM certificate
+  on the NLB listener) in front of it before using real data.
+- **Lease and heartbeat.** The heartbeat renews the lease every third of
+  `LEASE_SECONDS` while a request runs; if a renewal is refused, the trail
+  records `lease_lost` and side-effecting tools are blocked. After a crash the
+  lease simply expires, so a retry can wait up to `LEASE_SECONDS`.
+- **Crash window.** A crash between a side effect and its ledger write can repeat
+  the effect once (the trail marks it `ledger_pending` / `possibly_executed`).
+  Real downstream systems should also take an idempotency key.
+- **SDK-private state.** `Agent.as_tool` resumes a paused specialist from the same
+  `Interrupt` object the parent registered. After a restart, parent and
+  specialist each restore their own copy, so `share_interrupts()` in
+  `app/resilience.py` re-links them, and `reset_interrupt_state()` clears paused
+  agents on cancel. Both read the SDK-private `_interrupt_state`; the approval
+  tests in `tests/test_agent_flows.py` and `tests/test_hardening.py` guard them,
+  and `tests/test_integrity.py` checks that the private attributes still exist.
+  Strands is therefore pinned to `>=1.56.0,<1.57`; after bumping the pin, run the
+  tests and repeat the approval exercise before releasing.
+- **Throttling.** At most `AGENT_CONCURRENCY` agent turns run per pod; more return
+  `429`. Uvicorn's limit of 32 connections keeps health probes from starving, and
+  pods get 330 seconds to finish in-flight turns on shutdown.
+- **Sensitive data persists.** Audit, execution, and ledger items have no TTL and
+  contain prompts and tool inputs; cleanup does not delete them.
 
 ## Troubleshooting
 
-### The shared vector table is unavailable
-
-Workshop Studio creates the table before participants begin the workshop.
-Confirm that the canonical resource parameters are available:
+### The shared table or vector index is unavailable
 
 ```bash
-aws ssm get-parameters \
-  --region us-west-2 \
-  --names \
-    /workshop/mortgage-assistant/memory/table-name \
-    /workshop/mortgage-assistant/memory/vector-index-name
+aws ssm get-parameters --region us-west-2 --names \
+  /workshop/mortgage-assistant/memory/table-name /workshop/mortgage-assistant/memory/vector-index-name
 ```
 
-If either parameter is absent or empty, use the Workshop Studio support path to
-repair the pre-provisioned environment. The Lab 04 utilities require boto3
-1.43.64 or later for DynamoDB vector operations.
+If either parameter is absent or empty, use the Workshop Studio support path.
+To check the status, run
+`uv run python scripts/check_memory_ready.py --region us-west-2 --table-name <table> --vector-index-name <index>`;
+it prints `<table status> <index status>` and both must be `ACTIVE` (index
+creation and backfill can take several minutes). The utilities need boto3
+1.43.94 or later (pinned in `uv.lock`) for DynamoDB vector operations.
 
-### The vector index remains in CREATING
+### Memory is not recalled
 
-Index creation and backfill can take several minutes. Check:
+Run `uv run app/invoke_eks.py --show-context` and confirm both prompts used the
+same actor and session (`--new-session` intentionally clears short-term context).
+For long-term memory, check that a memory exists with `inspect_memory.py
+--memories`; if it does, retry because vector updates are eventually consistent,
+otherwise ask with `Remember for future conversations`.
 
-```bash
-MEMORY_TABLE_NAME="$(aws ssm get-parameter \
-  --region us-west-2 \
-  --name /workshop/mortgage-assistant/memory/table-name \
-  --query 'Parameter.Value' \
-  --output text)"
+### HTTP 401, 409, 429, and 500
 
-aws dynamodb describe-table \
-  --region us-west-2 \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query 'Table.VectorIndexes'
-```
-
-The index is ready when `IndexStatus` is `ACTIVE` and `Backfilling` is false.
-
-### Short-term memory is not recalled
-
-Display the client context:
-
-```bash
-uv run app/invoke_eks.py --show-context
-```
-
-Confirm both prompts used the same actor and session. Supplying
-`--new-session` intentionally clears short-term conversational context.
-
-### Long-term memory is not recalled
-
-Check whether a memory was written:
-
-```bash
-uv run app/inspect_memory.py --memories
-```
-
-If it exists, retry the query because vector-index updates are eventually
-consistent. If it does not exist, explicitly ask the assistant to
-`Remember for future conversations`.
-
-### The request receives HTTP 401
-
-The client normally reads the API key from the Kubernetes Secret. If using
-curl, retrieve it:
-
-```bash
-export MORTGAGE_API_KEY="$(
-  kubectl get secret mortgage-assistant-api-key \
-    --namespace mortgage-assistant \
-    --output jsonpath='{.data.api-key}' |
-  base64 --decode
-)"
-```
+- `401`: the client reads the key from the Kubernetes Secret. For curl, export
+  `MORTGAGE_API_KEY="$(kubectl get secret mortgage-assistant-api-key -n mortgage-assistant -o jsonpath='{.data.api-key}' | base64 --decode)"`.
+- `409`: read the message. `session ... is busy`: another request holds the lease
+  (after a crash, wait for `LEASE_SECONDS`). `request ... is awaiting approval`:
+  approve, deny, or `--cancel` it. `request_id ... used with a different prompt`:
+  pick a new `--request-id`.
+- `429`: all agent slots in the pod are busy; retry with the same `request_id`.
+- `500`: the request failed and is resumable. Run `--resume <request_id>` (the
+  client prints it) and inspect `--trail`.
 
 ### Pods receive AccessDenied from DynamoDB
 
-Confirm that Parameter Store discovery succeeds, then inspect the discovered
-table and pod logs:
+Confirm Parameter Store discovery works and read the pod logs (`kubectl logs
+--namespace mortgage-assistant deployment/mortgage-assistant --tail=200`). If
+discovery works but access is denied, use the Workshop Studio support path to
+verify the EKS Pod Identity permissions.
 
-```bash
-MEMORY_TABLE_NAME="$(aws ssm get-parameter \
-  --region us-west-2 \
-  --name /workshop/mortgage-assistant/memory/table-name \
-  --query 'Parameter.Value' \
-  --output text)"
+### `kubectl` or the deploy script times out
 
-aws dynamodb describe-table \
-  --region us-west-2 \
-  --table-name "$MEMORY_TABLE_NAME" \
-  --query 'Table.[TableName,TableStatus,SSEDescription]'
+`Unable to connect to the server: dial tcp ...:443: i/o timeout` usually means your public IP
+changed since Lab 0 and the EKS API only allows the old one. Rerun
+`./00-workshop-setup/scripts/deploy-infrastructure.sh --region us-west-2` (about two minutes).
+The deploy script also re-detects your IP for the load balancer's source range.
 
-kubectl logs \
-  --namespace mortgage-assistant \
-  deployment/mortgage-assistant \
-  --tail=200
-```
+### The audit chain is invalid or records are missing
 
-If discovery works but DynamoDB access is denied, use the Workshop Studio
-support path to verify the pre-provisioned EKS Pod Identity permissions.
+`chain_valid: false` means a record was altered, removed, or reordered; `anchor_valid: false` with a
+valid chain means records were removed from the end. A
+non-zero `dropped_records` on `execution_completed` means non-critical records
+could not be written; look for `Dropped non-critical audit record` in the pod logs.
 
-## Production-aligned patterns demonstrated by this lab
+## What is still missing for production
 
-Production readiness is an end-to-end property of the application,
-infrastructure, operational processes, and security controls. This workshop is
-not a production deployment, but it demonstrates several patterns that are
-appropriate foundations for one.
+This workshop is not a production deployment. It demonstrates several patterns
+that are sound foundations: a new agent per request with state outside the pods,
+idempotent and resumable execution, managed data protection (on-demand DynamoDB,
+AWS-managed KMS encryption, point-in-time recovery, TTL), Pod Identity instead
+of static keys, and hardened containers (two replicas, probes, a Pod Disruption
+Budget, non-root, read-only root filesystem, restricted Pod Security labels).
+These controls remain outside its scope:
 
-### Create an agent for each request
-
-Every `/invoke` request creates a new supervisor `Agent`. The agent object is
-not shared between concurrent requests, actors, or EKS replicas. The new agent
-receives a `SnapshotSessionManager` and `MemoryManager` for the request's
-actor and session, restores its state from DynamoDB, processes the prompt, and
-persists the updated state.
-
-```text
-HTTP request
-    |
-    v
-Create supervisor agent
-    |
-    +-- restore session from DynamoDB
-    +-- retrieve relevant durable memories
-    +-- process the prompt
-    +-- persist updated state
-    |
-    v
-Discard the in-process agent object
-```
-
-This keeps the application pods stateless. A subsequent prompt can be processed
-by either EKS replica, including after a pod replacement or rolling deployment.
-Creating a new Python agent object does not rebuild or redeploy the container
-image.
-
-### Externalize conversation state
-
-Short-term state and durable memory are stored outside the pods. Session
-snapshots use a configurable TTL, while durable preferences remain until an
-explicit deletion workflow removes them. Actor prefixes and vector-search
-partition filters separate memory namespaces in application code.
-
-### Use managed data-protection controls
-
-Workshop Studio configures DynamoDB on-demand capacity, server-side encryption
-with the AWS managed KMS key for DynamoDB (`alias/aws/dynamodb`), point-in-time
-recovery, TTL, and a partition-scoped vector index. The current table does not
-use a customer-managed KMS key. These are useful production building blocks,
-although retention, backup, restore, and deletion procedures must still be
-defined and tested.
-
-### Use workload identity instead of static AWS keys
-
-EKS pods obtain AWS permissions through EKS Pod Identity. AWS access keys are
-not stored in the image or Kubernetes manifests, and the pod role is scoped to
-the workshop resources required by the application.
-
-### Apply container and Kubernetes safety controls
-
-The deployment provides two replicas, rolling updates, health probes, a Pod
-Disruption Budget, resource requests and limits, a non-root user, a read-only
-root filesystem, dropped Linux capabilities, seccomp, restricted Pod Security
-labels, and bounded Uvicorn concurrency.
-
-These controls improve isolation and availability, but do not replace capacity
-testing, autoscaling, multi-AZ scheduling, or a formal security review.
-
-### Validate inputs and pin dependencies
-
-The API validates prompt length and identifier format, returns a request ID,
-and avoids returning raw exception details. Dependencies are captured in
-`uv.lock`, and tests cover identifiers, client session selection, TTL
-separation, and the API contract.
-
-## What is still missing for production and how to address it
-
-The following controls are intentionally outside the scope of this workshop.
-
-| Workshop implementation | Production concern | Recommended solution |
-|---|---|---|
-| One shared bearer API key | It does not provide individual identity, token expiry, or per-user authorization. | Use Amazon Cognito or another OIDC provider. Validate JWT signature, issuer, audience, and expiry. |
-| The request accepts `actor_id` | A caller with the API key can select another actor's namespace. Prefix filtering is not authorization. | Remove caller-controlled actor selection from the public API and derive the actor from the authenticated token's immutable `sub` claim. |
-| Internet-facing HTTP NLB | Prompts and credentials lack transport encryption, and the NLB does not provide application-layer WAF controls. | Terminate TLS with ACM. Use an ALB, API Gateway, or suitable ingress when OIDC, AWS WAF, quotas, or application routing are required. Consider a private endpoint for internal applications. |
-| No same-session concurrency control | Two prompts can read the same snapshot and persist conflicting updates. | Serialize requests by session, use a short-lived distributed lock, or add versioned conditional writes with conflict detection and bounded retry. |
-| No client idempotency key | A network retry can execute a tool or save a memory more than once. | Require an idempotency key for mutating requests, persist its result with a TTL, and make tool operations idempotent where possible. |
-| Direct Bedrock and DynamoDB calls | Throttling or transient failures can fail the entire request. | Add explicit timeouts, bounded retries with exponential backoff and jitter, retry budgets, and circuit breaking. Never retry non-idempotent tools blindly. |
-| `strands-dynamodb-storage==0.1.2` | An early-version dependency needs additional compatibility, load, and failure-mode assessment before handling production data. | Review its release and support posture, pin an approved version, test recovery and scale, and retain an application-owned storage interface so the implementation can be upgraded or replaced. |
-| The model decides when to save memory | Prompt injection or model error could store incorrect, duplicate, or sensitive content. | Put a deterministic policy layer in front of storage. Validate, redact, classify, deduplicate, and authorize proposed memories; require confirmation where appropriate. |
-| Prompt-only safety policy | Instructions alone are not a security boundary. | Add Bedrock Guardrails where appropriate, strict tool schemas, tool allowlists, retrieval-source controls, input/output validation, adversarial tests, and least-privilege tool permissions. |
-| Prompts and memories may contain sensitive data | Durable storage creates privacy, regulatory, retention, and deletion obligations. | Minimize collection, classify data, redact logs and traces, define retention and residency, and provide memory review, correction, export, and deletion workflows. |
-| No OpenTelemetry export or operational alarms | Operators cannot trace requests across FastAPI, Strands, Bedrock, tools, and DynamoDB or detect degradation promptly. | Export OpenTelemetry traces, metrics, and selected logs to CloudWatch. Alarm on latency, errors, throttling, failed writes, token usage, and vector-search failures. |
-| Fixed two replicas and no HPA | Capacity does not follow traffic, latency, or downstream model-call concurrency. | Load test the complete path, configure autoscaling, spread replicas across Availability Zones, validate node and Bedrock quotas, and add rate limits and backpressure. |
-| One Uvicorn worker with concurrency limited to four per pod | The workshop limit may be too low for production, while increasing it without testing can exhaust memory or service quotas. | Benchmark memory and latency, then tune workers, replicas, concurrency, connection pools, and Bedrock quotas together. Queue long-running asynchronous work. |
-| Session growth is not managed | Long conversations can become expensive or approach DynamoDB item-size limits. | Monitor snapshot size, compact or summarize old turns, cap conversation length, and offload large encrypted payloads to Amazon S3 when supported by the storage design. |
-| Vector-index updates are eventually consistent | A newly stored preference may not be immediately searchable. | Retain new memory in the active session and use bounded retry or an exact-read fallback when immediate confirmation is required. |
-| No tested disaster-recovery procedure | Point-in-time recovery alone does not demonstrate that recovery objectives can be met. | Define RTO and RPO, regularly test table restore and encryption configuration recovery, document regional dependencies, and add multi-Region recovery if required. |
-| Deployment runs from a participant laptop | There is no controlled promotion, provenance, approval, or automated rollback process. | Use CI/CD with reviewed changes, automated tests and evaluations, image scanning and signing, immutable image digests, staged rollout, and rollback criteria. |
-| Unit tests do not exercise AWS or production load | They cannot detect IAM, quota, race, retrieval-quality, model-behaviour, or integration regressions. | Add integration, concurrency, failure-injection, load, security, and recovery tests plus versioned evaluations for grounding, safety, latency, quality, and cost. |
+| Workshop implementation | Recommended solution |
+|---|---|
+| One shared bearer API key; caller-supplied `actor_id` and `reviewer`. | Use Amazon Cognito or another OIDC provider, derive the actor from the token's immutable `sub` claim, and require a different approver than the requester. |
+| Internet-facing HTTP NLB. | Terminate TLS with ACM; use an ALB or API Gateway with AWS WAF when needed, or a private endpoint. |
+| Hash-chained audit in the same table with no external anchor. | Stream to S3 with Object Lock, enable CloudTrail data events, and define audit retention and access controls. |
+| The model decides when to save memory; safety policy is prompt-only. | Add a deterministic policy layer (validate, redact, deduplicate, authorize), Bedrock Guardrails, strict tool schemas, and adversarial tests. |
+| `strands-dynamodb-storage==0.1.2` is an early version. | Review its support posture, test recovery and scale, and keep an application-owned storage interface. |
+| No tracing or alarms (Lab 5 adds tracing). | Export traces and metrics; alarm on latency, errors, throttling, failed writes, token usage, and vector-search failures. |
+| Fixed two replicas, no HPA; laptop deployment; unit tests only; no tested disaster recovery. | Load test and autoscale across AZs; use CI/CD with scanning and signed images; add integration, failure-injection, and evaluation tests; define RTO and RPO and test restores. Minimize and classify the sensitive data in prompts, memories, and audit records, and define retention and deletion workflows. |
 
 Before using this design for real mortgage information, complete formal
 security, privacy, reliability, model-risk, and operational-readiness reviews.
-Use mock or synthetic data until those controls are implemented.
 
 ## Cleanup
 
-To remove only Lab 04 resources:
-
 ```bash
-./scripts/cleanup-memory.sh \
-  --region us-west-2
+./scripts/cleanup-memory.sh --region us-west-2
 ```
 
-This removes only the EKS application namespace and load balancer. Workshop
-Studio continues to manage the shared DynamoDB memory table, vector index, IAM
-resources, EKS cluster, ECR repository, and Knowledge Base.
-
-To run Lab 03 again afterward:
+This removes the `mortgage-assistant` namespace (the application, its API-key
+Secret, and the load balancer) only. Workshop Studio continues to manage the
+DynamoDB table, vector index, IAM resources, EKS cluster, ECR repository, and
+Knowledge Base. Items stay in the table: snapshots expire by TTL, memories can be
+removed with `hydrate_memory.py clear`, and audit, execution, and ledger items
+have no TTL, so delete them with the AWS console or CLI if you need to. To run
+Lab 03 again afterward:
 
 ```bash
 cd ../03-eks-service
@@ -1073,16 +798,19 @@ cd ../03-eks-service
 ```
 
 To remove the entire workshop, use the Workshop Studio cleanup instructions.
-Do not delete shared resources from the Lab 04 cleanup script.
 
 ## Completion checkpoint
 
 You have completed Lab 04 when:
 
-- The API returns actor and session IDs.
-- A follow-up prompt recalls information from the current session.
-- The same session survives an EKS rollout restart.
-- A new session recalls a stored mortgage preference.
-- A paraphrased question retrieves the same preference.
-- An alternate actor does not retrieve the default actor's memory.
-- You can inspect both session and memory records in DynamoDB.
+- The API returns `request_id`, `status`, `attempt`, and an `explanation`.
+- A follow-up prompt recalls the current session, and the session survives an
+  EKS rollout restart.
+- A new session recalls a stored preference, a paraphrased question retrieves it,
+  and an alternate actor does not.
+- You can show a saved memory's provenance and the memories used in an answer
+  from the audit trail.
+- `--trail` shows the routing rationale, per-agent tool calls, and a valid hash chain.
+- A failed request resumes as attempt 2 with the same `request_id`.
+- A loan application waits for approval, survives a pod restart, and runs once
+  after approval; an abandoned approval can be cancelled.

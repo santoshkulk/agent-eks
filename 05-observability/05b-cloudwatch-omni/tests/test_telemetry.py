@@ -21,14 +21,16 @@ class InitTelemetryTests(unittest.TestCase):
         telemetry._initialized = False
 
     def tearDown(self) -> None:
-        telemetry._tracer = self._original_tracer
         telemetry._initialized = False
+        telemetry._tracer = self._original_tracer
 
     @patch("strands.telemetry.StrandsTelemetry")
     @patch("telemetry.trace.set_tracer_provider")
     def test_disabled_when_adot_is_not_running(
         self, mock_set_tracer_provider, strands_telemetry
     ) -> None:
+        # Without opentelemetry-instrument the global provider is the API's proxy
+        # provider, which has no add_span_processor: stay disabled, never create one.
         with patch("telemetry.trace.get_tracer_provider", return_value=object()):
             telemetry.init_telemetry()
         mock_set_tracer_provider.assert_not_called()
@@ -58,52 +60,66 @@ class InitTelemetryTests(unittest.TestCase):
             telemetry.init_telemetry()
         strands_telemetry.assert_called_once()
 
+    def test_configuration_failure_is_swallowed(self) -> None:
+        with patch(
+            "telemetry.trace.get_tracer_provider", return_value=Mock()
+        ), patch("strands.telemetry.StrandsTelemetry", side_effect=RuntimeError("boom")):
+            telemetry.init_telemetry()
 
-class TraceIdTests(unittest.TestCase):
-    def test_returns_none_without_an_active_span(self) -> None:
-        self.assertIsNone(telemetry.current_trace_id())
+    def test_module_does_not_use_langfuse_or_otlp_endpoint_configuration(self) -> None:
+        source = (APP_DIR / "telemetry.py").read_text()
+        self.assertNotIn("TELEMETRY_MASK_CONTENT", source)
+        self.assertNotIn("setup_otlp_exporter", source)
+        self.assertNotIn("TracerProvider(", source)
+        self.assertNotIn("set_tracer_provider(", source)
+        self.assertNotIn("x-langfuse", source)
 
 
-class TraceAttributesContextTests(unittest.TestCase):
-    def test_round_trips_through_the_context_variable(self) -> None:
-        attributes = {"session.id": "s1", "user.id": "u1", "tags": ["x"]}
+class TraceContextTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        telemetry.set_current_trace_attributes(None)
+
+    def test_attributes_round_trip_and_can_be_cleared(self) -> None:
+        attributes = telemetry.trace_attributes("actor-1", "session-1", "request-1")
         telemetry.set_current_trace_attributes(attributes)
         self.assertEqual(telemetry.current_trace_attributes(), attributes)
         telemetry.set_current_trace_attributes(None)
         self.assertIsNone(telemetry.current_trace_attributes())
 
+    def test_request_attributes_do_not_leak_after_replacement(self) -> None:
+        first = telemetry.trace_attributes("actor-1", "session-1", "request-1")
+        second = telemetry.trace_attributes("actor-2", "session-2", "request-2")
+        telemetry.set_current_trace_attributes(first)
+        telemetry.set_current_trace_attributes(second)
+        self.assertEqual(telemetry.current_trace_attributes(), second)
+        self.assertNotEqual(telemetry.current_trace_attributes(), first)
 
-class StartRequestSpanTests(unittest.TestCase):
-    def test_context_manager_does_not_raise_without_configured_tracing(self) -> None:
-        # No ADOT is not running in the test environment, so
-        # this exercises OpenTelemetry's default no-op tracer path.
-        with telemetry.start_request_span("test-span", {"key": "value"}):
-            pass
+    def test_request_context_is_restored_after_success_and_failure(self) -> None:
+        initial = {"session.id": "outer"}
+        request = telemetry.trace_attributes("actor-1", "session-1", "request-1")
+        telemetry.set_current_trace_attributes(initial)
+        with telemetry.use_trace_attributes(request):
+            self.assertEqual(telemetry.current_trace_attributes(), request)
+        self.assertEqual(telemetry.current_trace_attributes(), initial)
 
-    def test_exceptions_from_caller_are_not_suppressed(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "boom"):
+            with telemetry.use_trace_attributes(request):
+                raise ValueError("boom")
+        self.assertEqual(telemetry.current_trace_attributes(), initial)
+
+    def test_safe_span_does_not_suppress_application_errors(self) -> None:
+        with self.assertRaisesRegex(ValueError, "boom"):
             with telemetry.start_request_span("test-span"):
                 raise ValueError("boom")
 
 
 class FaultInjectionTests(unittest.TestCase):
-    def test_disabled_by_default_is_a_no_op(self) -> None:
+    def test_disabled_by_default_is_no_op(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FAULT_INJECTION_ENABLED", None)
             mortgage_agent.maybe_inject_fault("get_mortgage_details")
 
-    def test_ignores_calls_for_a_different_tool(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "FAULT_INJECTION_ENABLED": "true",
-                "FAULT_INJECTION_TOOL": "get_mortgage_details",
-                "FAULT_INJECTION_MODE": "error",
-            },
-        ):
-            mortgage_agent.maybe_inject_fault("some_other_tool")
-
-    def test_error_mode_raises_for_the_targeted_tool(self) -> None:
+    def test_error_mode_raises_for_targeted_tool(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -116,7 +132,7 @@ class FaultInjectionTests(unittest.TestCase):
                 mortgage_agent.maybe_inject_fault("get_mortgage_details")
 
     @patch("mortgage_agent.time.sleep")
-    def test_delay_mode_sleeps_for_the_configured_duration(self, sleep) -> None:
+    def test_delay_mode_uses_configured_duration(self, sleep) -> None:
         with patch.dict(
             os.environ,
             {

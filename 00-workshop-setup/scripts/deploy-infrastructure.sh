@@ -86,7 +86,8 @@ aws_cli cloudformation deploy \
   --parameter-overrides \
     ProjectName="$PROJECT_NAME" \
     AdminPrincipalArn="$ADMIN_PRINCIPAL_ARN" \
-    ClusterPublicAccessCidr="$PUBLIC_ACCESS_CIDR"
+    ClusterPublicAccessCidr="$PUBLIC_ACCESS_CIDR" \
+    KnowledgeBaseParameterName="/workshop/mortgage-assistant/bedrock/knowledge-base-id"
 
 stack_output() {
   local output_key="$1"
@@ -186,6 +187,19 @@ kubectl rollout status \
   --namespace kube-system \
   deployment/aws-load-balancer-controller \
   --timeout=10m
+
+echo "Publishing the Parameter Store values that Labs 3 and later read"
+publish_parameter() {
+  aws_cli ssm put-parameter \
+    --name "$1" \
+    --value "$2" \
+    --type String \
+    --overwrite >/dev/null
+}
+publish_parameter /workshop/mortgage-assistant/eks/cluster-name "$CLUSTER_NAME"
+publish_parameter /workshop/mortgage-assistant/ecr/repository-uri "$REPOSITORY_URI"
+publish_parameter /workshop/mortgage-assistant/memory/table-name "$MEMORY_TABLE_NAME"
+publish_parameter /workshop/mortgage-assistant/memory/vector-index-name "$MEMORY_VECTOR_INDEX_NAME"
 
 cat <<EOF
 

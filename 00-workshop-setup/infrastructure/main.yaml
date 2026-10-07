@@ -51,7 +51,7 @@ Parameters:
     Default: us.anthropic.claude-sonnet-4-6
   KnowledgeBaseParameterName:
     Type: String
-    Default: /app/mortgage_assistant/kb_id
+    Default: /workshop/mortgage-assistant/bedrock/knowledge-base-id
   MemoryTableName:
     Type: String
     Default: mortgage-assistant-workshop-memory

@@ -7,10 +7,11 @@ dependencies = [
     "aws-opentelemetry-distro>=0.20.0",
     "boto3>=1.43.94,<2",
     "fastapi>=0.115.0",
-    "strands-agents[otel]>=1.55.1,<2",
+    "strands-agents[otel]>=1.56.0,<1.57",
     "strands-agents-tools==0.2.6",
     "strands-dynamodb-storage==0.1.2",
     "uvicorn[standard]>=0.34.0",
 ]
+
 [tool.uv]
 package = false

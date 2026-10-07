@@ -29,37 +29,44 @@ class MemoryConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             memory.validate_identifier("participant/other", "actor_id")
 
-    @patch("memory.MemoryManager")
-    @patch("memory.DynamoDBMemoryStore")
     @patch("memory.SnapshotSessionManager")
     @patch("memory.DynamoDBStorage")
-    def test_session_storage_has_ttl_but_memory_storage_does_not(
+    def test_session_manager_is_message_level_with_ttl_and_history(
         self,
         storage_class,
         session_manager_class,
-        memory_store_class,
-        memory_manager_class,
     ) -> None:
-        durable_storage = object()
         session_storage = object()
-        storage_class.side_effect = [durable_storage, session_storage]
+        storage_class.return_value = session_storage
 
-        memory.create_memory_components(
-            actor_id="participant-1",
-            session_id="session-1",
-        )
+        memory.create_session_manager(actor_id="participant-1", session_id="session-1")
 
-        durable_call = storage_class.call_args_list[0]
-        session_call = storage_class.call_args_list[1]
-        self.assertNotIn("ttl_seconds", durable_call.kwargs)
         self.assertEqual(
-            session_call.kwargs["ttl_seconds"],
+            storage_class.call_args.kwargs["ttl_seconds"],
             memory.MEMORY_SESSION_TTL_SECONDS,
         )
         session_manager_class.assert_called_once_with(
             "session-1",
             storage=session_storage,
+            save_latest_on="message",
+            snapshot_trigger=memory._snapshot_trigger,
         )
+
+    @patch("memory.MemoryManager")
+    @patch("memory.DynamoDBMemoryStore")
+    @patch("memory.DynamoDBStorage")
+    def test_durable_memory_storage_has_no_ttl(
+        self,
+        storage_class,
+        memory_store_class,
+        memory_manager_class,
+    ) -> None:
+        durable_storage = object()
+        storage_class.return_value = durable_storage
+
+        memory.create_memory_manager(actor_id="participant-1")
+
+        self.assertNotIn("ttl_seconds", storage_class.call_args.kwargs)
         memory_store_class.assert_called_once_with(
             storage=durable_storage,
             partition="user/participant-1",

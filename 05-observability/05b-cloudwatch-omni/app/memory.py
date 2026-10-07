@@ -1,7 +1,10 @@
+import asyncio
+import hashlib
 import json
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -10,6 +13,9 @@ from strands.memory import MemoryEntry, MemoryManager
 from strands.memory.types import Metadata, SearchOptions
 from strands.session import SnapshotSessionManager
 from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
+
+from audit import current_trail, record_event
+from store import DynamoItemStore, ItemStore
 
 
 MEMORY_TABLE_NAME = os.environ.get("MEMORY_TABLE_NAME", "")
@@ -27,6 +33,8 @@ MEMORY_SESSION_TTL_SECONDS = int(
 MEMORY_MAX_SEARCH_RESULTS = int(
     os.environ.get("MEMORY_MAX_SEARCH_RESULTS", "5")
 )
+# Keep an immutable snapshot after every invocation (rollback and forensics).
+SNAPSHOT_HISTORY = os.environ.get("SNAPSHOT_HISTORY", "true").strip().lower() == "true"
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
@@ -51,6 +59,14 @@ def validate_identifier(value: str, label: str) -> str:
 
 def actor_partition(actor_id: str) -> str:
     return f"user/{validate_identifier(actor_id, 'actor_id')}"
+
+
+@lru_cache(maxsize=1)
+def get_item_store() -> ItemStore:
+    """Conditional-write store on the same table for audit, execution, and ledger items."""
+    if not MEMORY_TABLE_NAME:
+        raise RuntimeError("MEMORY_TABLE_NAME is not configured")
+    return DynamoItemStore(MEMORY_TABLE_NAME, get_region())
 
 
 @lru_cache(maxsize=1)
@@ -114,11 +130,33 @@ class DynamoDBMemoryStore:
         cleaned = content.strip()
         if not cleaned:
             return
+        trail = current_trail()
+        provenance: dict[str, str | int | float | bool] = {}
+        key = uuid.uuid4().hex
+        if trail is not None:
+            # Deterministic key: a retried request overwrites instead of duplicating.
+            digest = hashlib.sha256(
+                f"{trail.request_id}:{cleaned}".encode("utf-8")
+            ).hexdigest()
+            key = digest[:32]
+            provenance = {
+                "request_id": trail.request_id,
+                "session_id": trail.session_id,
+                "actor_id": trail.actor_id,
+                "source_agent": "supervisor",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
         await self.storage.write(
-            f"memories/{uuid.uuid4().hex}",
+            f"memories/{key}",
             cleaned.encode("utf-8"),
             vector=embed_text(cleaned),
-            metadata=_flat_metadata(metadata),
+            metadata={**_flat_metadata(metadata), **provenance},
+        )
+        await asyncio.to_thread(
+            record_event,
+            "memory_write",
+            "supervisor",
+            {"key": f"memories/{key}", "content": cleaned, **provenance},
         )
 
     async def search(
@@ -134,26 +172,67 @@ class DynamoDBMemoryStore:
                 include_values=True,
             )
         )
+        found = [result for result in results if result.data is not None]
+        await asyncio.to_thread(
+            record_event,
+            "memory_read",
+            "supervisor",
+            {
+                "query": query,
+                "results": [
+                    {
+                        "key": result.key,
+                        "score": result.score,
+                        "content": (result.data or b"").decode("utf-8")[:500],
+                    }
+                    for result in found
+                ],
+            },
+        )
         return [
             MemoryEntry(
-                content=result.data.decode("utf-8"),
+                content=(result.data or b"").decode("utf-8"),
                 metadata=result.metadata,
             )
-            for result in results
-            if result.data is not None
+            for result in found
         ]
 
 
-def create_memory_components(
-    actor_id: str,
-    session_id: str,
-) -> tuple[SnapshotSessionManager, MemoryManager]:
+def _snapshot_trigger(*, agent_data: Any, **kwargs: Any) -> bool:
+    return SNAPSHOT_HISTORY
+
+
+def _session_storage(actor_id: str) -> DynamoDBStorage:
+    return DynamoDBStorage(
+        MEMORY_TABLE_NAME,
+        region_name=get_region(),
+        prefix=actor_partition(actor_id),
+        compression="gzip",
+        ttl_seconds=MEMORY_SESSION_TTL_SECONDS,
+        index_name=MEMORY_VECTOR_INDEX_NAME,
+    )
+
+
+def create_session_manager(actor_id: str, session_id: str) -> SnapshotSessionManager:
+    """Message-level durable snapshots for one agent (the agent's own ``agent_id`` scopes the key).
+
+    Every specialist and the supervisor get their own manager, so each keeps its own
+    conversation under ``session/<session_id>/scopes/agent/<agent_id>/``.
+    """
     if not MEMORY_TABLE_NAME:
         raise RuntimeError("MEMORY_TABLE_NAME is not configured")
+    return SnapshotSessionManager(
+        validate_identifier(session_id, "session_id"),
+        storage=_session_storage(actor_id),
+        save_latest_on="message",
+        snapshot_trigger=_snapshot_trigger,
+    )
 
+
+def create_memory_manager(actor_id: str) -> MemoryManager:
+    if not MEMORY_TABLE_NAME:
+        raise RuntimeError("MEMORY_TABLE_NAME is not configured")
     partition = actor_partition(actor_id)
-    validated_session_id = validate_identifier(session_id, "session_id")
-
     durable_storage = DynamoDBStorage(
         MEMORY_TABLE_NAME,
         region_name=get_region(),
@@ -161,25 +240,7 @@ def create_memory_components(
         compression="gzip",
         index_name=MEMORY_VECTOR_INDEX_NAME,
     )
-    session_storage = DynamoDBStorage(
-        MEMORY_TABLE_NAME,
-        region_name=get_region(),
-        prefix=partition,
-        compression="gzip",
-        ttl_seconds=MEMORY_SESSION_TTL_SECONDS,
-        index_name=MEMORY_VECTOR_INDEX_NAME,
-    )
-
-    session_manager = SnapshotSessionManager(
-        validated_session_id,
-        storage=session_storage,
-    )
-    memory_store = DynamoDBMemoryStore(
-        storage=durable_storage,
-        partition=partition,
-    )
-    memory_manager = MemoryManager(
-        stores=[memory_store],  # type: ignore[list-item]
+    return MemoryManager(
+        stores=[DynamoDBMemoryStore(storage=durable_storage, partition=partition)],  # type: ignore[list-item]
         add_tool_config=True,
     )
-    return session_manager, memory_manager

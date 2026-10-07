@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from urllib.parse import quote
 
 
 DEFAULT_NAMESPACE = "mortgage-assistant"
@@ -22,6 +25,14 @@ DEFAULT_REGION = os.environ.get(
 DEFAULT_STATE_FILE = (
     Path(__file__).resolve().parents[1] / ".workshop" / "client-state.json"
 )
+
+
+class ApiError(RuntimeError):
+    """The API answered with an HTTP error."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def run_command(command: list[str], description: str) -> str:
@@ -145,6 +156,43 @@ def select_session(
     return session_id
 
 
+def call_api(
+    api_url: str,
+    api_key: str,
+    method: str,
+    path: str,
+    timeout: int,
+    body: dict | None = None,
+    params: dict | None = None,
+) -> dict:
+    url = f"{api_url.rstrip('/')}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        url=url,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ApiError(error.code, f"EKS API returned HTTP {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Unable to reach the EKS API: {error.reason}") from error
+    except (http.client.HTTPException, ConnectionError, TimeoutError) as error:
+        raise RuntimeError(
+            f"The EKS API closed the connection ({type(error).__name__}); "
+            "the pod may have restarted"
+        ) from error
+
+
 def invoke(
     api_url: str,
     api_key: str,
@@ -152,31 +200,109 @@ def invoke(
     actor_id: str,
     session_id: str,
     timeout: int,
+    request_id: str | None = None,
 ) -> dict:
-    request = urllib.request.Request(
-        url=f"{api_url.rstrip('/')}/invoke",
-        data=json.dumps(
-            {
-                "prompt": prompt,
-                "actor_id": actor_id,
-                "session_id": session_id,
-            }
-        ).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    body = {"prompt": prompt, "actor_id": actor_id, "session_id": session_id}
+    if request_id:
+        body["request_id"] = request_id
+    return call_api(api_url, api_key, "POST", "/invoke", timeout, body=body)
+
+
+def get_trail(
+    api_url: str, api_key: str, actor_id: str, session_id: str, request_id: str, timeout: int
+) -> dict:
+    return call_api(
+        api_url,
+        api_key,
+        "GET",
+        f"/executions/{quote(request_id, safe='')}",
+        timeout,
+        params={"actor_id": actor_id, "session_id": session_id},
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"EKS API returned HTTP {error.code}: {body}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Unable to reach the EKS API: {error.reason}") from error
+
+def resume(
+    api_url: str, api_key: str, actor_id: str, session_id: str, request_id: str, timeout: int
+) -> dict:
+    return call_api(
+        api_url,
+        api_key,
+        "POST",
+        f"/executions/{quote(request_id, safe='')}/resume",
+        timeout,
+        body={"actor_id": actor_id, "session_id": session_id},
+    )
+
+
+def cancel(
+    api_url: str, api_key: str, actor_id: str, session_id: str, request_id: str, timeout: int
+) -> dict:
+    return call_api(
+        api_url,
+        api_key,
+        "POST",
+        f"/executions/{quote(request_id, safe='')}/cancel",
+        timeout,
+        body={"actor_id": actor_id, "session_id": session_id},
+    )
+
+
+def decide(
+    api_url: str,
+    api_key: str,
+    actor_id: str,
+    session_id: str,
+    request_id: str,
+    approved: bool,
+    reviewer: str,
+    comment: str,
+    timeout: int,
+) -> dict:
+    """Answer every pending approval on the request with the same decision."""
+    trail = get_trail(api_url, api_key, actor_id, session_id, request_id, timeout)
+    pending = trail["execution"]["interrupts"]
+    if not pending:
+        raise RuntimeError(f"Request {request_id} has no pending approvals")
+    decisions = [
+        {
+            "interrupt_id": item["id"],
+            "approved": approved,
+            "reviewer": reviewer,
+            "comment": comment,
+        }
+        for item in pending
+    ]
+    return call_api(
+        api_url,
+        api_key,
+        "POST",
+        f"/executions/{quote(request_id, safe='')}/approvals",
+        timeout,
+        body={"actor_id": actor_id, "session_id": session_id, "decisions": decisions},
+    )
+
+
+def print_trail(trail: dict) -> None:
+    execution = trail["execution"]
+    print(
+        f"Request {execution['request_id']}: {execution['status']} "
+        f"(attempt {execution['attempt']}), hash chain "
+        f"{'valid' if trail['chain_valid'] else 'INVALID'}"
+    )
+    trace_ids = sorted({r["trace_id"] for r in trail["records"] if r.get("trace_id")})
+    if trace_ids:
+        print(f"  trace: {', '.join(trace_ids)}")
+    explanation = trail["explanation"]
+    for step in explanation["route"]:
+        print(f"  routed to {step['agent']}: {step['reason'] or '(no rationale recorded)'}")
+    for tool_call in explanation["tools_used"]:
+        print(f"  tool {tool_call['agent']}/{tool_call['tool']}: {tool_call['status']}")
+    for approval in explanation["approvals"]:
+        verdict = "approved" if approval["approved"] else "denied"
+        print(f"  {approval['tool']} {verdict} by {approval['reviewer']}")
+    print()
+    for record in trail["records"]:
+        print(f"  {record['seq']:>3} a{record['attempt']} {record['agent_id']:<16} {record['type']}")
 
 
 def main() -> int:
@@ -188,6 +314,37 @@ def main() -> int:
         "-p",
         help="Prompt to send. Optional when --show-context is used.",
     )
+    parser.add_argument(
+        "--request-id",
+        help="Idempotency key for the prompt. Re-send it to resume or replay the request.",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="REQUEST_ID",
+        help="Resume a failed request (REQUEST_ID, or 'last' for the previous one).",
+    )
+    parser.add_argument(
+        "--approve",
+        metavar="REQUEST_ID",
+        help="Approve the pending tool calls on a request ('last' is accepted).",
+    )
+    parser.add_argument(
+        "--deny",
+        metavar="REQUEST_ID",
+        help="Deny the pending tool calls on a request ('last' is accepted).",
+    )
+    parser.add_argument(
+        "--cancel",
+        metavar="REQUEST_ID",
+        help="Abandon a stuck or unwanted paused request ('last' is accepted).",
+    )
+    parser.add_argument(
+        "--trail",
+        metavar="REQUEST_ID",
+        help="Show the audit trail and explanation for a request ('last' is accepted).",
+    )
+    parser.add_argument("--reviewer", default="workshop-reviewer", help="Reviewer name.")
+    parser.add_argument("--comment", default="", help="Reviewer comment.")
     parser.add_argument(
         "--actor-id",
         help="Override the default participant-<AWS-account-id> actor.",
@@ -256,9 +413,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.prompt and not args.show_context:
-        parser.error("--prompt is required unless --show-context is used")
+    actions = [args.resume, args.approve, args.deny, args.trail, args.cancel]
+    if sum(1 for action in actions if action) > 1:
+        parser.error("use only one of --resume, --approve, --deny, --cancel, and --trail")
+    if not args.prompt and not args.show_context and not any(actions):
+        parser.error("--prompt is required unless --show-context or a request action is used")
 
+    sent_request_id: str | None = None
+    previous_request_id: str | None = None
     try:
         actor_id = args.actor_id or discover_actor_id(args.profile, args.region)
         state = load_state(args.state_file)
@@ -270,31 +432,100 @@ def main() -> int:
         )
         save_state(args.state_file, state)
 
-        print(f"Actor:   {actor_id}")
-        print(f"Session: {session_id}")
+        # With --json, keep stdout machine-readable: context goes to stderr.
+        context_stream = sys.stderr if args.json else sys.stdout
+        print(f"Actor:   {actor_id}", file=context_stream)
+        print(f"Session: {session_id}", file=context_stream)
 
-        if not args.prompt:
+        requests = state.setdefault("requests", {})
+
+        def resolve(request_id: str) -> str:
+            if request_id != "last":
+                return request_id
+            if actor_id not in requests:
+                raise RuntimeError("No previous request is recorded for this actor")
+            return requests[actor_id]
+
+        if not args.prompt and not any(actions):
             return 0
 
         api_url = args.url or discover_api_url(args.namespace, args.service)
         api_key = args.api_key or discover_api_key(args.namespace, args.secret)
-        result = invoke(
+        common = dict(
             api_url=api_url,
             api_key=api_key,
-            prompt=args.prompt,
             actor_id=actor_id,
             session_id=session_id,
             timeout=args.timeout,
         )
+        if args.trail:
+            trail = get_trail(request_id=resolve(args.trail), **common)
+            if args.json:
+                print(json.dumps(trail, indent=2))
+            else:
+                print_trail(trail)
+            return 0
+        if args.cancel:
+            result = cancel(request_id=resolve(args.cancel), **common)
+            print(f"Cancelled request {result['request_id']} ({result['status']})")
+            return 0
+        if args.resume:
+            result = resume(request_id=resolve(args.resume), **common)
+        elif args.approve or args.deny:
+            result = decide(
+                request_id=resolve(args.approve or args.deny),
+                approved=bool(args.approve),
+                reviewer=args.reviewer,
+                comment=args.comment,
+                **common,
+            )
+        else:
+            request_id = args.request_id or str(uuid.uuid4())
+            sent_request_id = request_id
+            previous_request_id = requests.get(actor_id)
+            requests[actor_id] = request_id
+            save_state(args.state_file, state)
+            result = invoke(
+                prompt=args.prompt,
+                request_id=request_id,
+                **common,
+            )
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
+        if (
+            sent_request_id
+            and isinstance(error, ApiError)
+            and 400 <= error.status < 500
+        ):
+            # Rejected before it ran (busy session, pending approval, bad input): this
+            # request does not exist, so 'last' must keep pointing at the previous one.
+            if previous_request_id:
+                state["requests"][actor_id] = previous_request_id
+            else:
+                state["requests"].pop(actor_id, None)
+            save_state(args.state_file, state)
+        elif sent_request_id:
+            print(
+                f"Request ID: {sent_request_id} "
+                f"(retry with --resume {sent_request_id}, or --trail {sent_request_id})",
+                file=sys.stderr,
+            )
         return 1
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
         print()
-        print(result.get("response", json.dumps(result)))
+        if result.get("status") == "awaiting_approval":
+            print("Awaiting approval for:")
+            for item in result.get("interrupts", []):
+                print(f"  {item['name']}: {json.dumps(item.get('reason'))}")
+            print()
+            print(f"Run with --approve {result['request_id']} or --deny {result['request_id']}")
+        else:
+            print(result.get("response") or "(no response text)")
+        print()
+        print(f"Request ID: {result.get('request_id')} (status: {result.get('status')})")
         trace_id = result.get("trace_id")
         if trace_id:
             print()

@@ -198,20 +198,47 @@ def enable_ttl(client: Any, table_name: str) -> None:
     )
 
 
-def enable_point_in_time_recovery(client: Any, table_name: str) -> None:
-    response = client.describe_continuous_backups(TableName=table_name)
-    status = response["ContinuousBackupsDescription"][
-        "PointInTimeRecoveryDescription"
-    ]["PointInTimeRecoveryStatus"]
-    if status == "ENABLED":
-        return
-    print("Enabling DynamoDB point-in-time recovery")
-    client.update_continuous_backups(
-        TableName=table_name,
-        PointInTimeRecoverySpecification={
-            "PointInTimeRecoveryEnabled": True,
-        },
-    )
+def enable_point_in_time_recovery(
+    client: Any,
+    table_name: str,
+    timeout_seconds: int = 300,
+) -> None:
+    """Enable PITR, waiting out the short window after table creation.
+
+    DynamoDB reports ContinuousBackupsUnavailableException ("Backups are being
+    enabled for the table") for a minute or so after a table becomes ACTIVE.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    while True:
+        description = client.describe_continuous_backups(TableName=table_name)[
+            "ContinuousBackupsDescription"
+        ]
+        status = description["PointInTimeRecoveryDescription"][
+            "PointInTimeRecoveryStatus"
+        ]
+        if status in {"ENABLED", "ENABLING"}:
+            return
+        if not announced:
+            print("Enabling DynamoDB point-in-time recovery")
+            announced = True
+        try:
+            client.update_continuous_backups(
+                TableName=table_name,
+                PointInTimeRecoverySpecification={
+                    "PointInTimeRecoveryEnabled": True,
+                },
+            )
+            return
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if (
+                code != "ContinuousBackupsUnavailableException"
+                or time.monotonic() >= deadline
+            ):
+                raise
+            print("Waiting for continuous backups to become available")
+            time.sleep(10)
 
 
 def main() -> int:
