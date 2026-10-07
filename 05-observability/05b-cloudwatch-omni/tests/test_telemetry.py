@@ -15,9 +15,13 @@ import telemetry  # noqa: E402
 
 class InitTelemetryTests(unittest.TestCase):
     def setUp(self) -> None:
+        # init_telemetry() replaces the module-level tracer, so restore it or a
+        # mocked tracer leaks into the tests that run afterwards.
+        self._original_tracer = telemetry._tracer
         telemetry._initialized = False
 
     def tearDown(self) -> None:
+        telemetry._tracer = self._original_tracer
         telemetry._initialized = False
 
     @patch("strands.telemetry.StrandsTelemetry")
