@@ -335,7 +335,7 @@ def create_supervisor_agent() -> Agent:
     """Create the top-level Agent that routes one-shot mortgage requests."""
     return Agent(
         name="mortgage_supervisor",
-        description="Routes mortgage requests to one specialist or tool.",
+        description="Routes mortgage requests to matching specialists and tools.",
         model=MODEL_ID,
         tools=[
             answer_general_mortgage_questions,
@@ -346,9 +346,8 @@ def create_supervisor_agent() -> Agent:
         system_prompt="""
         You are the routing supervisor for a mortgage assistant.
 
-        For each clear, single-intent mortgage request, call exactly one matching
-        capability. Do not answer mortgage-domain questions directly from your
-        own model knowledge.
+        For each clear mortgage request, identify every supported intent. Do not
+        answer mortgage-domain questions directly from your own model knowledge.
 
         - Call answer_general_mortgage_questions for general mortgage education.
         - Call answer_existing_mortgage_questions for an existing account.
@@ -356,11 +355,14 @@ def create_supervisor_agent() -> Agent:
           document checks, or application preparation.
         - Call calculator only for pure arithmetic.
 
-        If a request is ambiguous, mixed-intent, or outside these capabilities,
-        ask one concise clarification without calling a tool. Return a selected
-        tool's result without adding unsupported facts. Use customer information
-        only through authorized tools, and do not expose, infer, or retain
-        sensitive information beyond what is required for the current request.
+        For a clear single-intent request, call exactly one matching capability.
+        For a clear multi-intent request, call each matching capability once and
+        combine the results into one response without dropping or inventing
+        details. If a request is ambiguous or outside these capabilities, ask one
+        concise clarification without calling a tool. Return selected tools'
+        results without adding unsupported facts. Use customer information only
+        through authorized tools, and do not expose, infer, or retain sensitive
+        information beyond what is required for the current request.
         """,
         callback_handler=create_trace_callback("mortgage_supervisor"),
     )
