@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import date, timedelta
@@ -39,24 +40,33 @@ MODEL_ID = os.environ.get(
     "MODEL_ID",
     "us.anthropic.claude-sonnet-4-6",
 )
-KB_PARAMETER_NAME = os.environ.get(
-    "KB_PARAMETER_NAME",
-    "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
-)
+KB_PARAMETER_NAME = os.environ.get("KB_PARAMETER_NAME")
+CUSTOMER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 SUPERVISOR_PROMPT = """
-You are the supervisor for a mortgage assistant.
+You are the routing supervisor for a mortgage assistant.
 
-Route general mortgage information questions to general_mortgage_specialist,
-existing-account questions to existing_mortgage_specialist, and new application
-questions to new_application_specialist. Use the calculator for calculations.
+For each clear, single-intent mortgage request, call exactly one matching
+capability. Do not answer mortgage-domain questions directly from your own
+model knowledge.
 
-Before you call a specialist, you must write one sentence of visible text
-starting with "Routing rationale:" that says why you chose it, in the same
-message as the tool call. Never call a specialist without it. Each specialist returns a JSON report
-with answer, rationale, evidence, and assumptions. Base your reply on the
-report's answer, keep its caveats, and do not add facts the report does not
-contain. Present the result as one clear response.
+- Call mortgage_education_specialist for general mortgage education.
+- Call existing_mortgage_specialist for an existing mortgage account.
+- Call mortgage_application_specialist for application status, document
+  checks, or application creation.
+- Call calculator only for pure arithmetic.
+
+Before calling a specialist, write one sentence of visible text starting with
+"Routing rationale:" that explains why you chose it, in the same message as the
+tool call. Never call a specialist without this rationale. If a request is
+ambiguous, mixed-intent, or outside these capabilities, ask one concise
+clarifying question without calling a tool.
+
+Each specialist returns a JSON report with answer, rationale, evidence, and
+assumptions. Base your response on the report's answer, preserve its caveats,
+and do not add facts the report does not contain. Never claim that a customer ID
+or application was created unless the specialist reports the result of the
+corresponding creation tool.
 
 You have short-term conversation state and durable long-term memory. Use
 remembered information only when it is relevant to the current request. When
@@ -66,10 +76,12 @@ fact. Durable examples include a preferred loan term, fixed-versus-variable
 preference, approximate property-price range, deposit goal, payment priority,
 refinancing objective, or application timeline.
 
-Never add customer IDs, account numbers, authentication data,
-exact income, uploaded documents, or other sensitive financial identifiers to
-long-term memory. Do not claim to remember information unless it appears in the
-active session or was returned by the memory tools.
+Never add customer IDs, account numbers, authentication data, exact income,
+uploaded documents, or other sensitive financial identifiers to long-term
+memory. Do not claim to remember information unless it appears in the active
+session or was returned by the memory tools. Use customer information only
+through authorized tools, and do not expose, infer, or retain sensitive
+information beyond what the current request requires.
 """
 
 
@@ -93,11 +105,45 @@ def configure_logging() -> None:
             logger.addHandler(handler)
 
 
+def _get_aws_region() -> str:
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION must be configured")
+    return region
+
+
+def _validate_customer_id(customer_id: str) -> str:
+    normalized_customer_id = customer_id.strip()
+    if not CUSTOMER_ID_PATTERN.fullmatch(normalized_customer_id):
+        raise ValueError(
+            "Customer ID must be 1 to 64 characters and contain only letters, "
+            "numbers, hyphens, or underscores."
+        )
+    return normalized_customer_id
+
+
+def _extract_retrieval_text(tool_result: dict[str, Any]) -> str:
+    content = tool_result.get("content", [])
+    text = "\n".join(
+        item["text"]
+        for item in content
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    ).strip()
+
+    if tool_result.get("status") != "success":
+        detail = text or "The retrieval tool returned an unknown error."
+        raise RuntimeError(f"Mortgage knowledge retrieval failed: {detail}")
+
+    return text or "No relevant results were found in the mortgage knowledge base."
+
+
 @lru_cache(maxsize=1)
 def get_knowledge_base_id() -> str:
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not KB_PARAMETER_NAME:
+        raise RuntimeError("KB_PARAMETER_NAME must be configured")
+
     try:
-        parameter = boto3.client("ssm", region_name=region).get_parameter(
+        parameter = boto3.client("ssm", region_name=_get_aws_region()).get_parameter(
             Name=KB_PARAMETER_NAME
         )
     except Exception as error:
@@ -110,8 +156,29 @@ def get_knowledge_base_id() -> str:
     if not knowledge_base_id:
         raise RuntimeError(f"SSM parameter {KB_PARAMETER_NAME} is empty")
 
-    os.environ["KNOWLEDGE_BASE_ID"] = knowledge_base_id
     return knowledge_base_id
+
+
+@tool
+def retrieve_mortgage_knowledge(query: str) -> str:
+    """Retrieve information from the configured mortgage knowledge base."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("Retrieval query must not be empty")
+
+    tool_result = retrieve(
+        {
+            "toolUseId": f"mortgage-knowledge-{uuid.uuid4().hex}",
+            "input": {
+                "text": normalized_query,
+                "knowledgeBaseId": get_knowledge_base_id(),
+                "region": _get_aws_region(),
+                "numberOfResults": 5,
+                "score": 0.4,
+            },
+        }
+    )
+    return _extract_retrieval_text(tool_result)
 
 
 def _fault_injection_enabled() -> bool:
@@ -203,49 +270,67 @@ class SpecialistReport(BaseModel):
 
 
 GENERAL_PROMPT = """
-You are a mortgage information assistant.
+You are a mortgage education specialist.
 
-Always use the retrieve tool before answering a mortgage question.
-Answer only from information returned by the workshop Knowledge Base.
-If the Knowledge Base does not contain the answer, say "I don't know."
-Explain concepts in plain language, present balanced tradeoffs, and make
-it clear that general information is not personalized financial advice.
-Put the Knowledge Base passages you used in evidence.
+Always call retrieve_mortgage_knowledge before answering a mortgage question.
+Treat retrieved content as the authoritative source of mortgage facts. Do not
+fill gaps with unsupported model knowledge. If relevant evidence is unavailable,
+clearly say that the available mortgage knowledge does not contain the answer.
+
+Explain concepts in plain language, present balanced tradeoffs, and make clear
+that general information is not personalized financial advice. Never request or
+expose customer data, credentials, or tokens. Put the Knowledge Base passages
+you used in evidence.
 """
 
 EXISTING_PROMPT = """
-You are an existing-mortgage assistant.
+You are an existing mortgage specialist.
 
-Ask for a customer ID before using the mortgage-details tool. Explain
-balances, rates, payment dates, and payoff information clearly. The
-returned account data is mock workshop data. Do not invent account
-information that was not returned by a tool. Put the tool output you used
-in evidence.
+If the request contains a customer ID, use it immediately. Ask for a customer
+ID only when none was supplied. Always call get_mortgage_details before stating
+account facts.
+
+Explain only the balances, rates, and payment dates returned by the tool. Do
+not invent account
+information, calculate an unsupported payoff quote, or provide approval,
+eligibility, pricing, or personalized financial advice. Put the tool output you
+used in evidence and do not expose unrelated account data.
 """
 
 NEW_APPLICATION_PROMPT = """
-You are a new mortgage application assistant.
+You are a mortgage application specialist.
 
-Ask for a customer ID first and create one if necessary. Collect name,
-age, annual income, and annual expenses one question at a time before
-creating an application; earlier answers in this conversation are still
-available to you. Use tools for all application data and never invent
-information that was not returned by a tool. Put the tool output you used
-in evidence.
+Use every required field already supplied in the current request or earlier in
+this conversation; never ask for a supplied field again. For application status
+or document questions, call the matching tool with the supplied customer ID,
+and ask for the ID only when it is missing.
+
+To create an application, use a supplied customer ID or call create_customer_id
+when one is needed. Collect any missing name, age, annual income, and annual
+expenses one question at a time. Call create_loan_application only after every
+required field is available and the user has asked to create the application.
+That side effect requires approval.
+
+Never say that a customer ID or application was created before the corresponding
+tool executes successfully. Never claim that an application was approved,
+priced, or persisted beyond what the creation tool reports. Use tools for all
+application data, do not invent information, and put the tool outputs you used
+in evidence. Do not provide lending, eligibility, or personalized financial
+advice, and do not expose customer information beyond the current task.
 """
 
 
 @tool
-def get_mortgage_details(customer_id: str) -> dict:
-    """Return mock existing-mortgage data for the workshop."""
+def get_mortgage_details(customer_id: str) -> dict[str, Any]:
+    """Return mortgage details for the specified customer."""
+    normalized_customer_id = _validate_customer_id(customer_id)
     maybe_inject_fault("get_mortgage_details")
     today = date.today()
     return {
-        "account_number": customer_id,
+        "customer_id": normalized_customer_id,
+        "account_number": f"MORTGAGE-{normalized_customer_id}",
         "outstanding_principal": 150000.0,
         "interest_rate": 4.5,
-        "maturity_date": "2030-06-30",
-        "payments_remaining": 72,
         "last_payment_date": str(today - timedelta(days=30)),
         "next_payment_due": str(today + timedelta(days=1)),
         "next_payment_amount": 1250.0,
@@ -253,34 +338,40 @@ def get_mortgage_details(customer_id: str) -> dict:
 
 
 @tool
-def get_mortgage_app_doc_status(customer_id: str | None = None) -> list[dict]:
-    """Return mock required-document status for a mortgage application."""
-    return [
-        {"type": "proof_of_income", "status": "COMPLETED"},
-        {"type": "employment_information", "status": "MISSING"},
-        {"type": "proof_of_assets", "status": "COMPLETED"},
-        {"type": "credit_information", "status": "COMPLETED"},
-    ]
+def get_mortgage_application_document_statuses(
+    customer_id: str,
+) -> dict[str, Any]:
+    """Return document statuses for a customer's mortgage application."""
+    normalized_customer_id = _validate_customer_id(customer_id)
+    return {
+        "customer_id": normalized_customer_id,
+        "documents": [
+            {"type": "proof_of_income", "status": "COMPLETED"},
+            {"type": "employment_information", "status": "MISSING"},
+            {"type": "proof_of_assets", "status": "COMPLETED"},
+            {"type": "credit_information", "status": "COMPLETED"},
+        ],
+    }
 
 
 @tool
-def get_application_details(customer_id: str | None = None) -> dict:
-    """Return mock details about a mortgage application."""
+def get_application_details(customer_id: str) -> dict[str, str]:
+    """Return mortgage application details for the specified customer."""
+    normalized_customer_id = _validate_customer_id(customer_id)
     return {
-        "customer_id": customer_id or "123456",
+        "customer_id": normalized_customer_id,
         "application_id": "998776",
         "application_date": str(date.today() - timedelta(days=35)),
         "application_status": "IN_PROGRESS",
         "application_type": "NEW_MORTGAGE",
-        "name": "Workshop Customer",
     }
 
 
 @tool
 @idempotent
 def create_customer_id() -> str:
-    """Create a mock customer ID."""
-    return "123456"
+    """Create a customer ID for a new application."""
+    return f"CUST-{uuid.uuid4().hex[:8].upper()}"
 
 
 @tool
@@ -290,35 +381,54 @@ def create_loan_application(
     name: str,
     age: int,
     annual_income: int,
-    annual_expense: int,
+    annual_expenses: int,
 ) -> str:
-    """Create a mock loan application."""
+    """Create a loan application after approval."""
+    normalized_customer_id = _validate_customer_id(customer_id)
+    normalized_name = name.strip()
+    if not normalized_name or len(normalized_name) > 100:
+        raise ValueError("Name must contain between 1 and 100 characters.")
+    if not 18 <= age <= 100:
+        raise ValueError("Age must be between 18 and 100.")
+    if not 0 < annual_income <= 10_000_000:
+        raise ValueError("Annual income must be between 1 and 10,000,000.")
+    if not 0 <= annual_expenses <= annual_income:
+        raise ValueError(
+            "Annual expenses must be non-negative and no greater than annual income."
+        )
+
     return (
-        f"Loan application created for {name} (customer {customer_id}); "
-        f"age={age}, annual_income={annual_income}, "
-        f"annual_expense={annual_expense}."
+        f"Loan application created for {normalized_name} "
+        f"(customer {normalized_customer_id}); age={age}, "
+        f"annual_income={annual_income}, annual_expenses={annual_expenses}."
     )
 
 
 SPECIALISTS: dict[str, dict[str, Any]] = {
-    "general_mortgage_specialist": {
+    "mortgage_education_specialist": {
         "agent_id": "general",
-        "description": "Answer general mortgage questions using the workshop Knowledge Base.",
+        "description": (
+            "Answers general mortgage education questions using the configured "
+            "mortgage knowledge base."
+        ),
         "prompt": GENERAL_PROMPT,
-        "tools": [retrieve],
+        "tools": [retrieve_mortgage_knowledge],
     },
     "existing_mortgage_specialist": {
         "agent_id": "existing",
-        "description": "Answer questions about a mock customer's existing mortgage.",
+        "description": "Answers questions about existing mortgage accounts.",
         "prompt": EXISTING_PROMPT,
         "tools": [get_mortgage_details],
     },
-    "new_application_specialist": {
+    "mortgage_application_specialist": {
         "agent_id": "new_application",
-        "description": "Handle new mortgage application questions and create applications.",
+        "description": (
+            "Handles mortgage application status, document checks, and "
+            "approved application creation."
+        ),
         "prompt": NEW_APPLICATION_PROMPT,
         "tools": [
-            get_mortgage_app_doc_status,
+            get_mortgage_application_document_statuses,
             get_application_details,
             create_customer_id,
             create_loan_application,
@@ -365,7 +475,7 @@ def create_specialist_tool(
 ) -> Any:
     """Build one specialist as an agent-as-tool with its own persistent session."""
     spec = SPECIALISTS[name]
-    if name == "general_mortgage_specialist" and model is None:
+    if name == "mortgage_education_specialist" and model is None:
         get_knowledge_base_id()
     agent = Agent(
         model=model or MODEL_ID,
@@ -485,7 +595,7 @@ def main() -> int:
     """Run one local prompt against the complete Lab 5 agent."""
     parser = argparse.ArgumentParser(description="Mortgage Assistant Agent")
     parser.add_argument("--prompt", "-p", required=True)
-    parser.add_argument("--actor-id", default="local-workshop-user")
+    parser.add_argument("--actor-id", default="local-user")
     parser.add_argument("--session-id", default="local-session")
     args = parser.parse_args()
     configure_logging()

@@ -60,6 +60,14 @@ class ManifestAndDependencyTests(unittest.TestCase):
                 self.assertNotIn(f"import {other}", source)
                 self.assertNotIn(f"from {other} import", source)
 
+    def test_manifest_and_deploy_script_inject_required_agent_configuration(self) -> None:
+        manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
+        deploy = (MODULE_DIR / "scripts" / "deploy-observability.sh").read_text()
+        for variable in ("AWS_REGION", "KB_PARAMETER_NAME"):
+            self.assertIn(f"name: {variable}", manifest)
+            self.assertIn(f"__{variable}__", manifest)
+            self.assertIn(f"s|__{variable}__|", deploy)
+
     def test_manifest_and_deploy_script_agree_on_resume_settings(self) -> None:
         manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
         deploy = (MODULE_DIR / "scripts" / "deploy-observability.sh").read_text()

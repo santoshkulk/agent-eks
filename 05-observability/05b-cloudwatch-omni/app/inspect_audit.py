@@ -17,9 +17,9 @@ from store import DynamoItemStore
 
 MEMORY_TABLE_PARAMETER_NAME = "/workshop/mortgage-assistant/memory/table-name"
 SPECIALIST_TOOLS = {
-    "general_mortgage_specialist",
+    "mortgage_education_specialist",
     "existing_mortgage_specialist",
-    "new_application_specialist",
+    "mortgage_application_specialist",
 }
 
 

@@ -5,7 +5,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from mortgage_agent import (
     MODEL_ID,
@@ -16,7 +16,7 @@ from mortgage_agent import (
 
 
 configure_logging()
-logger = logging.getLogger("mortgage_api")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Mortgage Assistant",
@@ -30,16 +30,29 @@ if not API_KEY:
 
 
 class InvokeRequest(BaseModel):
+    """Validated request for one stateless agent invocation."""
+
     prompt: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_non_whitespace_prompt(cls, value: str) -> str:
+        """Reject prompts that contain no non-whitespace characters."""
+        if not value.strip():
+            raise ValueError("Prompt must contain at least one non-whitespace character")
+        return value
 
 
 class InvokeResponse(BaseModel):
+    """Response from one stateless agent invocation."""
+
     request_id: str
     response: str
     duration_ms: int
 
 
 def authorize(authorization: str | None) -> None:
+    """Require the configured bearer credential."""
     expected = f"Bearer {API_KEY}"
     if not authorization or not hmac.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
@@ -47,11 +60,13 @@ def authorize(authorization: str | None) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Report that the HTTP process is live."""
     return {"status": "ok"}
 
 
 @app.get("/health/ready")
 def readiness() -> dict[str, str]:
+    """Report that required Knowledge Base configuration resolves."""
     return {
         "status": "ready",
         "knowledge_base_id": get_knowledge_base_id(),
@@ -64,14 +79,19 @@ def invoke(
     request: InvokeRequest,
     authorization: str | None = Header(default=None),
 ) -> InvokeResponse:
+    """Authorize and run one request-correlated, stateless prompt."""
     authorize(authorization)
     request_id = str(uuid.uuid4())
     started = time.monotonic()
 
     try:
-        response = run_prompt(request.prompt)
+        response = run_prompt(request.prompt, request_id=request_id)
     except Exception as error:
-        logger.exception("Mortgage assistant request %s failed", request_id)
+        logger.error(
+            "Mortgage assistant request failed request_id=%s error_type=%s",
+            request_id,
+            type(error).__name__,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Mortgage assistant request failed; request_id={request_id}",

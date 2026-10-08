@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
+os.environ.setdefault(
+    "KB_PARAMETER_NAME",
+    "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
+)
+os.environ.setdefault("AWS_REGION", "us-west-2")
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
 os.environ.setdefault("MORTGAGE_API_KEY", "test-api-key")
 os.environ.setdefault(
@@ -27,7 +32,7 @@ class ApiContractTests(unittest.TestCase):
         self.client = TestClient(mortgage_api.app)
         self.headers = {"Authorization": "Bearer test-api-key"}
 
-    def test_canonical_model_and_knowledge_base_defaults(self) -> None:
+    def test_canonical_model_and_configured_knowledge_base_parameter(self) -> None:
         self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-4-6")
         self.assertEqual(
             mortgage_agent.KB_PARAMETER_NAME,

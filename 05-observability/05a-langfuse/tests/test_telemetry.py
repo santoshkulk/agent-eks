@@ -8,6 +8,8 @@ from unittest.mock import Mock, patch
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
+os.environ.setdefault("KB_PARAMETER_NAME", "/workshop/mortgage-assistant/bedrock/knowledge-base-id")
+os.environ.setdefault("AWS_REGION", "us-west-2")
 
 import mortgage_agent  # noqa: E402
 import telemetry  # noqa: E402

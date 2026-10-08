@@ -28,6 +28,10 @@ class ManifestAndDependencyTests(unittest.TestCase):
             "minAvailable: 1",
             "kind: Service",
             "type: LoadBalancer",
+            "name: AWS_REGION",
+            "name: AWS_DEFAULT_REGION",
+            "name: KB_PARAMETER_NAME",
+            'value: "__KB_PARAMETER_NAME__"',
             "name: CREDIT_SCORE_MCP_URL",
             'value: "__CREDIT_SCORE_MCP_URL__"',
             "name: OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -63,10 +67,12 @@ class ManifestAndDependencyTests(unittest.TestCase):
                 self.assertNotIn(f"import {other}", source)
                 self.assertNotIn(f"from {other} import", source)
 
-    def test_manifest_and_deploy_script_agree_on_resume_settings(self) -> None:
+    def test_manifest_and_deploy_script_agree_on_runtime_settings(self) -> None:
         manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
         deploy = (MODULE_DIR / "scripts" / "deploy-mcp-integration.sh").read_text()
         for variable in (
+            "AWS_REGION",
+            "KB_PARAMETER_NAME",
             "APPROVAL_REQUIRED_TOOLS",
             "LEASE_SECONDS",
             "ENABLE_REASONING",

@@ -15,6 +15,8 @@ sys.path.insert(0, str(APP_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
 os.environ.setdefault("MORTGAGE_API_KEY", "test-api-key")
+os.environ.setdefault("KB_PARAMETER_NAME", "/workshop/mortgage-assistant/bedrock/knowledge-base-id")
+os.environ.setdefault("AWS_REGION", "us-west-2")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from strands.agent.state import AgentState  # noqa: E402

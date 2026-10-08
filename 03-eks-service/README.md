@@ -175,7 +175,7 @@ sequenceDiagram
         Bedrock-->>Tools: Return grounded answer
         Tools-->>Agent: Return tool result
     else Existing mortgage application or calculation
-        Agent->>Tools: Call selected mock data tool or calculator
+        Agent->>Tools: Call selected synthetic fixture tool or calculator
         Tools-->>Agent: Return tool result
     end
 
@@ -306,19 +306,20 @@ call them without the participant API key.
 
 ### Strands application
 
-`app/mortgage_agent.py` contains the same multi-agent application introduced
-in Lab 02.
+`app/mortgage_agent.py` carries the Lab 02 semantics into a stateless service.
+The `mortgage_supervisor` routes one clear intent to
+`mortgage_education_specialist`, `existing_mortgage_specialist`,
+`mortgage_application_specialist`, or the calculator. The application tools are
+`answer_general_mortgage_questions`, `answer_existing_mortgage_questions`, and
+`answer_mortgage_application_questions`.
 
-The supervisor routes prompts to specialized tools:
-
-- General mortgage information.
-- Existing mock-mortgage questions.
-- New mock-loan application questions.
-- Calculations.
-
-The general mortgage assistant uses the Bedrock Knowledge Base. At runtime,
-`get_knowledge_base_id()` reads its identifier from the SSM parameter created
-by the Workshop Studio foundation infrastructure.
+The education specialist can use only `retrieve_mortgage_knowledge`. This fixed
+wrapper resolves the Knowledge Base ID from the required `KB_PARAMETER_NAME`,
+requires an AWS Region, and fixes the retrieval Region, result count, and score.
+The account and application tools validate generic customer IDs and return
+coherent synthetic workshop fixtures. `prepare_mortgage_application` validates
+a complete request and prepares it for review; it does not submit or persist an
+application.
 
 ### FastAPI application
 
@@ -333,12 +334,14 @@ def invoke(
     authorization: str | None = Header(default=None),
 ) -> InvokeResponse:
     authorize(authorization)
-    response = run_prompt(request.prompt)
+    request_id = str(uuid.uuid4())
+    response = run_prompt(request.prompt, request_id=request_id)
     ...
 ```
 
-FastAPI validates that the prompt contains between 1 and 4,000 characters.
-The response contains:
+FastAPI validates that the prompt contains 1-4,000 raw characters and at least
+one non-whitespace character. It creates a request ID and passes that same ID
+into `run_prompt()` for safe trace correlation. The response contains:
 
 - A unique request ID.
 - The assistant response.
@@ -444,7 +447,7 @@ This is appropriate for a self-contained workshop account, but it is not a
 complete production identity system. A production API should authenticate
 individual users and authorize access to application data.
 
-Use only mock information in this workshop. Do not enter real customer,
+Use only synthetic information in this workshop. Do not enter real customer,
 personal, account, or financial information.
 
 ## TODO: Replace the shared API key with Amazon Cognito
@@ -575,25 +578,20 @@ no AWS access:
 uv run python -m unittest discover --start-directory tests --verbose
 ```
 
-The application reads `MODEL_ID` from the environment. If your shell already
+Direct execution requires a Region and the SSM parameter name. The application
+also reads optional `MODEL_ID` from the environment. If your shell already
 exports `MODEL_ID` for another tool, run `unset MODEL_ID` first.
 
-Test the agent as a standalone Python process before starting FastAPI:
-
 ```bash
+export AWS_REGION=us-west-2
+export KB_PARAMETER_NAME=/workshop/mortgage-assistant/bedrock/knowledge-base-id
+
 uv run app/mortgage_agent.py \
   --prompt "What are the benefits of a 15-year mortgage?"
 ```
 
-For a named AWS CLI profile:
-
-```bash
-export AWS_PROFILE=YOUR_AWS_PROFILE
-export AWS_REGION=us-west-2
-
-uv run app/mortgage_agent.py \
-  --prompt "When does mortgage refinancing make sense?"
-```
+For a named AWS CLI profile, also set `AWS_PROFILE=YOUR_AWS_PROFILE` before
+running the same command.
 
 Expected result:
 
@@ -612,6 +610,7 @@ Set a local API key:
 ```bash
 export MORTGAGE_API_KEY="$(openssl rand -hex 32)"
 export AWS_REGION=us-west-2
+export KB_PARAMETER_NAME=/workshop/mortgage-assistant/bedrock/knowledge-base-id
 ```
 
 If necessary, also select a named AWS profile:
@@ -874,8 +873,17 @@ Example response:
 }
 ```
 
-The request ID can be used to correlate a failed request with application
-logs.
+The same request ID appears in successful responses, sanitized failure
+responses, and metadata-only agent traces. Concurrent records can interleave,
+so correlate them by `request_id`. Traces use `[delegate]` and `[tool]` records
+with only delegation/tool names and agent names; they intentionally omit prompts, streamed model text, tool
+arguments and results, customer IDs, names, and financial values.
+
+The synthetic account fixture can be exercised with a generic ID such as
+`CUST-WORKSHOP-123`. A complete one-shot preparation prompt must provide name,
+age, annual income, and annual expenses together. The resulting application is
+prepared for review only and is neither submitted nor persisted. Use only
+synthetic values.
 
 To bypass Kubernetes discovery, provide the endpoint and key:
 
@@ -1117,7 +1125,8 @@ Request body:
 }
 ```
 
-The prompt must contain between 1 and 4,000 characters.
+The prompt must contain 1-4,000 raw characters and at least one non-whitespace
+character.
 
 ### Successful response
 
@@ -1134,7 +1143,7 @@ The prompt must contain between 1 and 4,000 characters.
 | Status | Meaning |
 | --- | --- |
 | `401` | The bearer token is missing or invalid. |
-| `422` | FastAPI rejected an invalid request body, such as an empty prompt. |
+| `422` | FastAPI rejected a missing, malformed, oversized, empty, or whitespace-only prompt. |
 | `500` | The agent invocation failed; the response includes a request ID. |
 | `503` | The pod is at its concurrency limit of 32 requests; retry later. |
 
@@ -1445,11 +1454,14 @@ Dependencies are locked, images receive immutable timestamped tags, ECR stores
 the build artifact, and Kubernetes performs a declarative rollout. Health and
 smoke checks run before the deployment script reports success.
 
-### Explicit API boundary
+### Explicit API boundary and safe trace correlation
 
 FastAPI provides validated input and output schemas, request identifiers,
 health endpoints, authentication enforcement, and a consistent place for
-future authorization, telemetry, rate limiting, and policy controls.
+future authorization, telemetry, rate limiting, and policy controls. Each
+accepted invocation passes its request ID through a concurrency-safe context;
+custom traces record only agent, delegation, and tool names. Prompt/model text,
+tool inputs/results, and customer or financial values are not logged.
 
 ## What is still missing for production and how to address it
 
@@ -1467,15 +1479,15 @@ future authorization, telemetry, rate limiting, and policy controls.
 | No client idempotency key | Retried requests could repeat side-effecting tools added in a future implementation. | Require idempotency keys for mutating operations, persist results with TTL, and design tools to be idempotent. |
 | AWS calls rely mainly on SDK defaults | Throttling or transient errors may fail requests unpredictably. | Configure explicit connection and operation timeouts, bounded exponential backoff with jitter, retry budgets, and circuit breaking. Do not blindly retry side effects. |
 | Prompt instructions are the main model safety control | Prompt injection, unsupported claims, or unsafe tool arguments can bypass intended behavior. | Add Bedrock Guardrails where appropriate, strict tool schemas, tool authorization, input/output validation, retrieval-source controls, and adversarial evaluations. |
-| Application logs remain in pod output only | Operators lack end-to-end traces, service-level metrics, retention policy, and actionable alarms. | Export structured logs, OpenTelemetry traces, and metrics to CloudWatch. Correlate request and trace IDs and alarm on latency, errors, throttling, saturation, token use, and cost. |
+| Metadata-only application traces remain in pod output only | Operators can correlate safe delegation/tool metadata by request ID, but lack durable end-to-end traces, service-level metrics, retention policy, and actionable alarms. | Export structured logs, OpenTelemetry traces, and metrics to CloudWatch while preserving data-minimizing trace fields. Correlate request and trace IDs and alarm on latency, errors, throttling, saturation, token use, and cost. |
 | Deployment runs from Workshop Studio Code Editor | There is no controlled promotion, approval, provenance, automated security gate, or rollback policy. | Use CI/CD with tests and model evaluations, image scanning and signing, software bills of materials, immutable image digests, staged rollout, and automated rollback criteria. |
 | Tests are primarily local and functional | They do not establish production scale, resilience, security, or model quality. | Add integration, contract, load, soak, failure-injection, security, and recovery tests plus versioned evaluations for grounding, accuracy, safety, latency, and cost. |
 | No formal recovery and dependency plan | EKS, ECR, SSM, Bedrock, the Knowledge Base, and networking have different failure and recovery characteristics. | Define service-level objectives, RTO and RPO, dependency failure behavior, regional recovery, runbooks, game days, and tested rollback procedures. |
 | Stateless requests have no user conversation context | This is safe for routing but cannot support continuity or personalized memory. | Add state only after authenticated identity, authorization, concurrency, privacy, retention, and deletion controls are designed. Lab 04 demonstrates the workshop memory pattern. |
 
 Before accepting real mortgage information, complete formal security, privacy,
-reliability, model-risk, and operational-readiness reviews. Continue using mock
-or synthetic information until those controls are implemented.
+reliability, model-risk, and operational-readiness reviews. Continue using
+synthetic information until those controls are implemented.
 
 ## Cleanup
 

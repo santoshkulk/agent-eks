@@ -129,6 +129,13 @@ trace that contains all of them.
 
 Everything else under `app/` is the Lab 5a application, unchanged.
 
+The visible specialist tools are `mortgage_education_specialist`,
+`existing_mortgage_specialist`, and `mortgage_application_specialist`. Their
+stable persistence/audit IDs remain `general`, `existing`, and
+`new_application`, respectively. The application specialist retains its
+multi-turn field collection and approval-gated `create_loan_application`
+side effect.
+
 `OTEL_EXPORTER_OTLP_ENDPOINT` must stay unset. ADOT would use it instead of the
 X-Ray endpoint. `app/telemetry.py` never creates a second tracer provider,
 because OpenTelemetry keeps only the first one registered. When ADOT is not
@@ -163,7 +170,10 @@ The deployment uses the shared workshop foundation (EKS cluster, ECR, memory
 table, Knowledge Base). It creates its own Secret and its own Deployment and
 Service, `mortgage-assistant-omni`. The two services share the DynamoDB table.
 The client keeps separate session state per lab directory, so Lab 5a and Lab 5b
-use different sessions unless you pass the same `--session-id`.
+use different sessions unless you pass the same `--session-id`. The application
+requires `AWS_REGION` (or `AWS_DEFAULT_REGION`) and `KB_PARAMETER_NAME`;
+`deploy-omni.sh` injects the selected Region and canonical Knowledge Base
+parameter path into the pod.
 
 From the repository root:
 
@@ -225,8 +235,8 @@ ID, status, and trace ID of each:
 
 | Request | What it exercises |
 | --- | --- |
-| General question: "What are the benefits of a 15-year mortgage?" | Supervisor, then the Knowledge Base specialist and its model calls |
-| Existing mortgage lookup: "What is the outstanding principal on account 555000111?" | Supervisor, then the account specialist and the `get_mortgage_details` tool |
+| General question: "What are the benefits of a 15-year mortgage?" | Supervisor, then `mortgage_education_specialist` and its `retrieve_mortgage_knowledge` tool/model calls |
+| Existing mortgage lookup: "What is the outstanding principal on account 555000111?" | Supervisor, then `existing_mortgage_specialist` and the `get_mortgage_details` tool |
 | Conversation, turn 1: "I am considering a property worth 600,000 dollars." | A new session |
 | Conversation, turn 2: "What property value did I mention in this conversation?" | The same session, with the earlier turn recalled from the session snapshot |
 

@@ -2,8 +2,11 @@
 
 Lab 6 is a complete checkpoint of the instrumented, audited mortgage assistant from Lab 5. Participants first initialize a pre-provisioned credit-score MCP server managed by the credit-services team, list and call its tool independently, then integrate that remote capability with the Strands supervisor, deploy the changed agent, and watch the remote call appear in the audit trail.
 
-It adds one remote Model Context Protocol (MCP) tool named `get_credit_score`.
-Everything else is carried forward unchanged from Labs 4 and 5.
+It adds one remote Model Context Protocol (MCP) tool named `get_credit_score`
+and propagates the production-style mortgage prompts, explicit Knowledge Base
+retrieval, and local input validation into this complete checkpoint. The Lab 4
+and Lab 5 persistence, approval, audit, resilience, and observability behavior
+remains intact.
 
 This directory is self-contained. Runtime modules do not import files from an
 earlier lab.
@@ -60,13 +63,21 @@ flowchart LR
 
 Each agent run (a new prompt, a resume, or an approval decision) builds a new supervisor for the supplied actor and session. The supervisor receives:
 
-- `general_mortgage_specialist`, `existing_mortgage_specialist`, and `new_application_specialist` (agents-as-tools from Lab 4);
+- `mortgage_education_specialist`, `existing_mortgage_specialist`, and `mortgage_application_specialist` (agents-as-tools with persistent `agent_id` values `general`, `existing`, and `new_application`);
 - `calculator`;
 - the remote `get_credit_score` MCP tool (new in Lab 6);
 - the Lab 4 session manager and memory manager; and
 - the Lab 5 actor, session, and request trace attributes.
 
 The specialists never receive `get_credit_score`. Only the supervisor can call it.
+The mortgage education specialist calls `retrieve_mortgage_knowledge`, which
+requires `KB_PARAMETER_NAME` and an AWS Region, resolves the Knowledge Base ID
+from Parameter Store, and sends an explicit bounded retrieval request. Generic
+customer and application tools trim and validate synthetic IDs and application
+fields. Application collection stays multi-turn; its stateful operations remain
+`create_customer_id` and `create_loan_application`, with generated `CUST-*` IDs
+and the plural `annual_expenses` field so approval, audit, and ledger keys remain
+stable.
 
 The API starts one root request span, then the orchestrator takes the session lease and binds the audit trail. Inside the agent run, the application opens a Strands `MCPClient`, initializes the Streamable HTTP transport, discovers the MCP server tools, validates the exact contract, creates the supervisor, and invokes it while the MCP client context and request span remain open. The response includes the active `trace_id` for correlation in Langfuse and in the audit trail.
 
@@ -423,7 +434,7 @@ uv run app/invoke_eks.py --region us-west-2 --prompt "What is a fixed-rate mortg
 uv run app/invoke_eks.py --region us-west-2 --trail last
 ```
 
-This trail shows a route to `general_mortgage_specialist` and no `get_credit_score` records, even though the MCP connection was still opened and validated for the request. You can also read the same trail directly from DynamoDB with `uv run app/inspect_audit.py --region us-west-2 --session-id SESSION_ID --request-id REQUEST_ID --records`, which uses your AWS identity instead of the API key.
+This trail shows a route to `mortgage_education_specialist` and no `get_credit_score` records, even though the MCP connection was still opened and validated for the request. You can also read the same trail directly from DynamoDB with `uv run app/inspect_audit.py --region us-west-2 --session-id SESSION_ID --request-id REQUEST_ID --records`, which uses your AWS identity instead of the API key.
 
 ## Exercise (optional): gate `get_credit_score` behind approval
 

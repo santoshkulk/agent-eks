@@ -115,9 +115,9 @@ POST /invoke ──► Orchestrator (lease, audit trail, status)    │
               supervisor Agent  ── hooks: Resume · Approval · Audit · FailFast
                 │  tools: calculator, search_memory, add_memory (MemoryManager)
                 │
-                ├─ general_mortgage_specialist   ┐  (Knowledge Base `retrieve`)
-                ├─ existing_mortgage_specialist  ├─ Agent.as_tool(preserve_context=True)
-                └─ new_application_specialist    ┘   own agent_id, own snapshot, own hooks,
+                ├─ mortgage_education_specialist  ┐  (`retrieve_mortgage_knowledge`)
+                ├─ existing_mortgage_specialist   ├─ Agent.as_tool(preserve_context=True)
+                └─ mortgage_application_specialist┘   own agent_id, own snapshot, own hooks,
                                                       structured SpecialistReport
 All state ─► one DynamoDB table (snapshots, memories + vector index, audit, exec, lock, ledger)
 Models   ─► Bedrock (agent model, Titan embeddings); Pod Identity supplies credentials
@@ -127,12 +127,25 @@ Models   ─► Bedrock (agent model, Titan embeddings); Pod Identity supplies c
   objects and discards them afterwards, so pods stay stateless: a later prompt
   can run on either replica and restore everything from DynamoDB.
 - Each agent has its own `SnapshotSessionManager` under the same `session_id`
-  and a distinct `agent_id`. The new-application specialist now remembers the
-  fields it has already collected.
+  and a distinct, stable `agent_id` (`general`, `existing`, or
+  `new_application`). The mortgage-application specialist remembers the fields
+  it has already collected and does not ask for supplied fields again.
 - Long-term memory (`MemoryManager`) is attached to the supervisor only, so a
   durable fact is stored once, at the user-facing boundary.
 - Swarm and Graph were not used: they cannot persist member agents, and
   `SnapshotSessionManager` rejects multi-agent orchestrators.
+
+The mortgage-education specialist can ground answers only through
+`retrieve_mortgage_knowledge`, which resolves the Knowledge Base from the
+required `KB_PARAMETER_NAME`, requires `AWS_REGION` or `AWS_DEFAULT_REGION`, and
+uses fixed retrieval bounds. Existing-account and application tools validate a
+generic 1-to-64-character customer ID. Application status and document tools
+require that ID. `create_customer_id` creates a synthetic `CUST-*` ID, while
+`create_loan_application` remains an idempotent, approval-gated, audit-critical
+side effect with bounded name, age, income, and annual-expense inputs. The
+application specialist collects missing fields one at a time across its durable
+session, never re-asks supplied fields, and claims creation only after the tool
+succeeds.
 
 ### Request flow
 
@@ -653,7 +666,7 @@ but the trail endpoint returns full tool results and prompts.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `MODEL_ID` | `us.anthropic.claude-sonnet-4-6` | Agent model. |
-| `KB_PARAMETER_NAME` | canonical SSM path | Knowledge Base ID lookup. |
+| `KB_PARAMETER_NAME` | required; deploy injects `/workshop/mortgage-assistant/bedrock/knowledge-base-id` | Knowledge Base ID lookup. `AWS_REGION` or `AWS_DEFAULT_REGION` is also required. |
 | `MEMORY_TABLE_NAME`, `MEMORY_VECTOR_INDEX_NAME`, `MEMORY_EMBEDDING_MODEL_ID` | from SSM; `amazon.titan-embed-text-v2:0` | Storage and embeddings. |
 | `MEMORY_SESSION_TTL_SECONDS` | `604800` | Snapshot TTL (`--session-ttl-seconds`). |
 | `SNAPSHOT_HISTORY` | `true` | Immutable snapshot per invocation (`--no-snapshot-history`). |

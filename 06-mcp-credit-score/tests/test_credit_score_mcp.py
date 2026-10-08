@@ -91,7 +91,6 @@ class CreditScoreMCPTests(unittest.TestCase):
                 self.fail("Unexpected tool contract should not be yielded")
 
     @patch("mortgage_agent.share_interrupts")
-    @patch("mortgage_agent.get_knowledge_base_id", return_value="kb-test")
     @patch("mortgage_agent.create_memory_manager", return_value="memory-manager")
     @patch("mortgage_agent.create_session_manager", return_value="session-manager")
     @patch("mortgage_agent.Agent")
@@ -121,6 +120,14 @@ class CreditScoreMCPTests(unittest.TestCase):
         )
         as_tool_calls = agent_class.return_value.as_tool.call_args_list
         self.assertEqual(len(as_tool_calls), 3)
+        self.assertEqual(
+            [call.kwargs["name"] for call in as_tool_calls],
+            [
+                "mortgage_education_specialist",
+                "existing_mortgage_specialist",
+                "mortgage_application_specialist",
+            ],
+        )
         for call in as_tool_calls:
             self.assertIs(call.kwargs["preserve_context"], True)
         self.assertEqual(agent_class.call_args.kwargs["agent_id"], "supervisor")

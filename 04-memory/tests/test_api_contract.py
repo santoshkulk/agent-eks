@@ -23,11 +23,11 @@ class ApiContractTests(unittest.TestCase):
         self.client = TestClient(mortgage_api.app)
         self.headers = {"Authorization": "Bearer test-api-key"}
 
-    def test_canonical_model_and_knowledge_base_defaults(self) -> None:
+    def test_model_and_knowledge_base_configuration(self) -> None:
         self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-4-6")
         self.assertEqual(
             mortgage_agent.KB_PARAMETER_NAME,
-            "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
+            os.environ.get("KB_PARAMETER_NAME"),
         )
 
     def _orchestrator(self, outcome=None, error=None):

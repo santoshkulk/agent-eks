@@ -73,7 +73,7 @@ class ToolResultCapTests(unittest.TestCase):
         return AfterToolCallEvent(
             agent=MagicMock(),
             selected_tool=None,
-            tool_use={"name": "retrieve", "toolUseId": "t", "input": {}},
+            tool_use={"name": "retrieve_mortgage_knowledge", "toolUseId": "t", "input": {}},
             invocation_state={},
             result={"toolUseId": "t", "status": "success", "content": [{"text": text}, {"json": {"k": 1}}]},
         )

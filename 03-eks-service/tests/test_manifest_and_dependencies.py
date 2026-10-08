@@ -38,6 +38,9 @@ class ManifestAndDependencyTests(unittest.TestCase):
             "loadBalancerSourceRanges:",
             "aws-load-balancer-scheme: internet-facing",
             "name: mortgage-assistant-api-key",
+            "name: AWS_REGION\n              value: __AWS_REGION__",
+            "name: AWS_DEFAULT_REGION\n              value: __AWS_REGION__",
+            "name: KB_PARAMETER_NAME\n              value: __KB_PARAMETER_NAME__",
         ):
             self.assertIn(expected, manifest)
 

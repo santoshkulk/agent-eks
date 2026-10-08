@@ -44,8 +44,10 @@ What Lab 5 adds:
   from Secrets Manager; and
 - five exercises that read traces in Langfuse.
 
-The agent behavior, the API routes, and the audit and resume logic are
-unchanged from Lab 4.
+Lab 5 preserves Lab 4's API routes, memory, audit, approval, and resume
+behavior while aligning the shared mortgage-agent contract with the
+production-style checkpoints: explicit Knowledge Base configuration, validated
+synthetic fixtures, grounded retrieval, and stable specialist identities.
 
 ## Learning objectives
 
@@ -172,15 +174,19 @@ flowchart TB
     langfuseNlb --> langfuseWeb
 ```
 
-The existing Bedrock Knowledge Base, DynamoDB table, and mortgage tools
-remain unchanged. Lab 5 updates the same `mortgage-assistant` Deployment
-and continues to use the same Network Load Balancer. Workshop Studio
+The existing Bedrock Knowledge Base and DynamoDB table remain unchanged. The
+mortgage tools use validated synthetic fixtures, and Lab 5 updates the same
+`mortgage-assistant` Deployment and continues to use the same Network Load
+Balancer. Workshop Studio
 pre-provisions the EKS cluster, the DynamoDB table, the Langfuse
 deployment and its backing services, and other shared workshop
 infrastructure before the lab begins.
 Lab 5 discovers those resources through canonical Systems Manager
 Parameter Store paths and reads Langfuse's generated API keys from Secrets
-Manager at deploy time.
+Manager at deploy time. The application requires `AWS_REGION` (or
+`AWS_DEFAULT_REGION`) and `KB_PARAMETER_NAME`; the deployment script injects
+the selected Region and the canonical Knowledge Base parameter path into both
+replicas rather than relying on Python defaults.
 
 ### Where telemetry sits in the observable service
 
@@ -193,12 +199,20 @@ EKS pod
                 └── root span "mortgage_assistant.invoke" (one per request)
                     └── supervisor Agent (mortgage_supervisor)
                         ├── specialist Agents as tools (own session, own tools)
-                        │   general_mortgage_specialist      -> retrieve
+                        │   mortgage_education_specialist    -> retrieve_mortgage_knowledge
                         │   existing_mortgage_specialist     -> get_mortgage_details
-                        │   new_application_specialist       -> application tools
+                        │   mortgage_application_specialist       -> application tools
                         ├── calculator
                         └── memory, audit, resume, and approval components (Lab 4)
 ```
+
+The visible specialist tools are `mortgage_education_specialist`,
+`existing_mortgage_specialist`, and `mortgage_application_specialist`. Their
+stable persistence and audit IDs remain `general`, `existing`, and
+`new_application`, respectively. The application specialist keeps its
+persistent multi-turn field collection; `create_customer_id` and the
+approval-gated `create_loan_application` remain idempotent, audit-critical side
+effects.
 
 `telemetry.init_telemetry()` runs exactly once per process, as early as
 possible: at import time in both `mortgage_api.py` and `mortgage_agent.py`
@@ -303,7 +317,7 @@ Key points:
 - The specialist is a persistent `Agent` exposed as a tool, so its
   `invoke_agent` span sits *under* the supervisor's `execute_tool
   <specialist>` span, and the specialist's own tool calls (for example
-  `retrieve` or `get_mortgage_details`) are separate spans beneath it. The
+  `retrieve_mortgage_knowledge` or `get_mortgage_details`) are separate spans beneath it. The
   specialist's `SpecialistReport` structured-output step is also recorded as
   an `execute_tool SpecialistReport` span.
 - Every span in the trace — including the root span — carries `session.id`,
@@ -719,10 +733,10 @@ that trace ID, and inspect:
 
 - The root `mortgage_assistant.invoke` span and its total latency.
 - The `invoke_agent mortgage_supervisor` span and, under its
-  `execute_tool general_mortgage_specialist` span, the
-  `invoke_agent general_mortgage_specialist` span — the specialist's own
+  `execute_tool mortgage_education_specialist` span, the
+  `invoke_agent mortgage_education_specialist` span — the specialist's own
   agent run, nested inside the supervisor's tool call.
-- The specialist's `retrieve` tool span (the Knowledge Base call) and its
+- The specialist's `retrieve_mortgage_knowledge` tool span (the Knowledge Base call) and its
   duration.
 - The `chat` model-call spans for the supervisor and the specialist,
   including input/output token counts.
@@ -736,7 +750,7 @@ uv run app/invoke_eks.py --region us-west-2 --trail last --json
 ```
 
 The first command prints the routing and tool summary (the supervisor's
-`general_mortgage_specialist` call and the specialist's own `retrieve` call)
+`mortgage_education_specialist` call and the specialist's own `retrieve_mortgage_knowledge` call)
 and the ordered records. In the `--json` output, find `execution.trace_id`
 and the `trace_id` on each record, and confirm they match the `Trace ID:`
 line from the invocation and the trace you opened in Langfuse. The

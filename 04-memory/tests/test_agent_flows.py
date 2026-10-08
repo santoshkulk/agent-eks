@@ -62,7 +62,7 @@ def supervisor_handler(messages, tool_specs, tool_choice):
     if "apply" in prompt:
         return [
             ("text", "Routing rationale: the user wants a new application."),
-            ("tool", "new_application_specialist", {"input": prompt}),
+            ("tool", "mortgage_application_specialist", {"input": prompt}),
         ]
     return [("text", "Hello")]
 
@@ -95,7 +95,7 @@ def specialist_handler(messages, tool_specs, tool_choice):
                     "name": "Sam",
                     "age": 30,
                     "annual_income": 90000,
-                    "annual_expense": 40000,
+                    "annual_expenses": 40000,
                 },
             )
         ]
@@ -134,7 +134,7 @@ class Harness:
             specialist_model=ScriptedModel(specialist_handler),
             session_factory=self.session_factory(session_id),
             use_memory=False,
-            specialists=["existing_mortgage_specialist", "new_application_specialist"],
+            specialists=["existing_mortgage_specialist", "mortgage_application_specialist"],
         )
         return supervisor(agent_input)
 
@@ -148,7 +148,7 @@ class Harness:
             specialist_model=ScriptedModel(specialist_handler),
             session_factory=self.session_factory(session_id),
             use_memory=False,
-            specialists=["existing_mortgage_specialist", "new_application_specialist"],
+            specialists=["existing_mortgage_specialist", "mortgage_application_specialist"],
         )
         found = {"supervisor": list(supervisor.messages)}
         for registered in supervisor.tool_registry.registry.values():
