@@ -12,7 +12,8 @@ from uuid import uuid4
 
 import boto3
 from strands import Agent, tool
-from strands_tools import calculator, retrieve
+from strands_tools import calculator
+from strands_tools.retrieve import retrieve
 
 
 logger = logging.getLogger(__name__)

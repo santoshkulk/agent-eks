@@ -15,7 +15,8 @@ from strands import Agent, tool
 from strands.agent import AgentResult
 from strands.hooks import AfterToolCallEvent, BeforeModelCallEvent, HookProvider, HookRegistry
 from strands.models import BedrockModel
-from strands_tools import calculator, retrieve
+from strands_tools import calculator
+from strands_tools.retrieve import retrieve
 
 import telemetry
 from approvals import ApprovalHook

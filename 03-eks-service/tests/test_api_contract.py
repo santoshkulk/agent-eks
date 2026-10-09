@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -187,6 +187,26 @@ class KnowledgeBaseContractTests(unittest.TestCase):
                 "score": 0.4,
             },
         )
+
+    def test_retrieval_wrapper_calls_the_real_retrieve_tool(self) -> None:
+        # Only the AWS client is faked, so a non-callable `retrieve` import fails here.
+        runtime = MagicMock()
+        runtime.retrieve.return_value = {
+            "retrievalResults": [
+                {
+                    "content": {"text": "A 15-year term builds equity faster."},
+                    "score": 0.49,
+                    "location": {},
+                }
+            ]
+        }
+        with patch(
+            "mortgage_agent.get_knowledge_base_id", return_value="KB12345"
+        ), patch("strands_tools.retrieve.boto3.client", return_value=runtime):
+            result = mortgage_agent.retrieve_mortgage_knowledge("15-year benefits")
+        self.assertIn("builds equity faster", result)
+        runtime.retrieve.assert_called_once()
+        self.assertEqual(runtime.retrieve.call_args.kwargs["knowledgeBaseId"], "KB12345")
 
     def test_retrieval_wrapper_handles_blank_failure_and_empty_success(self) -> None:
         with self.assertRaises(ValueError):
