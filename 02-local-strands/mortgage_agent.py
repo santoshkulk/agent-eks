@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any
@@ -26,6 +27,36 @@ SPECIALIST_TOOLS = {
     "answer_existing_mortgage_questions": "existing_mortgage_specialist",
     "answer_mortgage_application_questions": "mortgage_application_specialist",
 }
+NO_KNOWLEDGE_EVIDENCE_RESPONSE = (
+    "The configured mortgage Knowledge Base does not contain enough "
+    "information to answer that question."
+)
+KNOWLEDGE_RETRIEVAL_FAILURE_RESPONSE = (
+    "The mortgage Knowledge Base retrieval failed, so I cannot provide a "
+    "grounded answer."
+)
+_RETRIEVAL_OUTCOME: ContextVar[dict[str, Any] | None] = ContextVar(
+    "mortgage_retrieval_outcome",
+    default=None,
+)
+_ZERO_RESULT_MARKERS = (
+    "retrieved 0 results",
+    "no results found above score threshold",
+)
+_FALSE_OUTAGE_MARKERS = (
+    "temporarily unavailable",
+    "unable to retrieve",
+    "retrieval encountered an issue",
+    "try again shortly",
+)
+
+
+def _record_retrieval_outcome(status: str, result: str | None = None) -> None:
+    tracker = _RETRIEVAL_OUTCOME.get()
+    if tracker is not None:
+        tracker["status"] = status
+        if result is not None:
+            tracker["result"] = result
 
 
 def configure_logging() -> None:
@@ -108,10 +139,17 @@ def _extract_retrieval_text(tool_result: dict[str, Any]) -> str:
     ).strip()
 
     if tool_result.get("status") != "success":
+        _record_retrieval_outcome("error")
         detail = text or "The retrieval tool returned an unknown error."
         raise RuntimeError(f"Mortgage knowledge retrieval failed: {detail}")
 
-    return text or "No relevant results were found in the mortgage knowledge base."
+    lowered_text = text.lower()
+    if not text or any(marker in lowered_text for marker in _ZERO_RESULT_MARKERS):
+        _record_retrieval_outcome("no_evidence", NO_KNOWLEDGE_EVIDENCE_RESPONSE)
+        return NO_KNOWLEDGE_EVIDENCE_RESPONSE
+
+    _record_retrieval_outcome("success", text)
+    return text
 
 
 @lru_cache(maxsize=1)
@@ -143,19 +181,31 @@ def retrieve_mortgage_knowledge(query: str) -> str:
     if not normalized_query:
         raise ValueError("Retrieval query must not be empty")
 
-    tool_result = retrieve(
-        {
-            "toolUseId": f"mortgage-knowledge-{uuid4().hex}",
-            "input": {
-                "text": normalized_query,
-                "knowledgeBaseId": get_knowledge_base_id(),
-                "region": _get_aws_region(),
-                "numberOfResults": 5,
-                "score": 0.4,
-            },
-        }
-    )
-    return _extract_retrieval_text(tool_result)
+    tracker = _RETRIEVAL_OUTCOME.get()
+    if tracker is not None and "result" in tracker:
+        return str(tracker["result"])
+    if tracker is not None and tracker.get("status") == "error":
+        raise RuntimeError(
+            "Mortgage knowledge retrieval already failed for this question."
+        )
+
+    try:
+        tool_result = retrieve(
+            {
+                "toolUseId": f"mortgage-knowledge-{uuid4().hex}",
+                "input": {
+                    "text": normalized_query,
+                    "knowledgeBaseId": get_knowledge_base_id(),
+                    "region": _get_aws_region(),
+                    "numberOfResults": 5,
+                    "score": 0.4,
+                },
+            }
+        )
+        return _extract_retrieval_text(tool_result)
+    except Exception:
+        _record_retrieval_outcome("error")
+        raise
 
 
 @tool
@@ -195,7 +245,21 @@ def answer_general_mortgage_questions(query: str) -> str:
         """,
         callback_handler=create_trace_callback("mortgage_education_specialist"),
     )
-    return str(agent(query))
+    tracker: dict[str, Any] = {}
+    token = _RETRIEVAL_OUTCOME.set(tracker)
+    try:
+        response = str(agent(query))
+        status = tracker.get("status")
+        if status == "no_evidence":
+            return NO_KNOWLEDGE_EVIDENCE_RESPONSE
+        if status in {None, "error"}:
+            return KNOWLEDGE_RETRIEVAL_FAILURE_RESPONSE
+        lowered_response = response.lower()
+        if any(marker in lowered_response for marker in _FALSE_OUTAGE_MARKERS):
+            return NO_KNOWLEDGE_EVIDENCE_RESPONSE
+        return response
+    finally:
+        _RETRIEVAL_OUTCOME.reset(token)
 
 
 @tool
