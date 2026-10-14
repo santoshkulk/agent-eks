@@ -270,7 +270,7 @@ curl --fail --silent --show-error \
 cat <<EOF
 
 
-Lab 03 completed.
+Lab 03 deployment completed.
   EKS cluster: $CLUSTER_NAME
   Image: $IMAGE_URI
   API endpoint: http://${SERVICE_ENDPOINT}
