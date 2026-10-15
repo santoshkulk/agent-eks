@@ -9,14 +9,6 @@ PROMPT="What is the balance on customer ID 123456's mortgage?"
 SESSION_TTL_SECONDS="604800"
 MODEL_ID="us.anthropic.claude-sonnet-4-6"
 MEMORY_EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
-FAULT_INJECTION_ENABLED="false"
-FAULT_INJECTION_TOOL="get_mortgage_details"
-FAULT_INJECTION_MODE="delay"
-FAULT_INJECTION_DELAY_SECONDS="5"
-APPROVAL_REQUIRED_TOOLS="create_loan_application"
-LEASE_SECONDS="180"
-ENABLE_REASONING="false"
-SNAPSHOT_HISTORY="true"
 IMAGE_URI_OVERRIDE=""
 CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
@@ -32,26 +24,13 @@ Deploys the Lab 4 mortgage assistant. Prerequisites: Labs 0-3 (the cluster, ECR
 repository, memory table, Knowledge Base, and API-key Secret).
 
 Options:
-  --region REGION                    AWS Region (default: us-west-2).
-  --profile PROFILE                  AWS CLI profile; omit to use the default profile.
-  --service-access-cidr CIDR         CIDR allowed to invoke the mortgage-assistant API.
-  --session-ttl-seconds N            Short-term session retention (default: 604800).
-  --prompt TEXT                      Smoke-test prompt.
-  --fault-injection-enabled          Enable the fault-injection exercise.
-  --fault-injection-tool NAME        Tool to target (default: get_mortgage_details).
-  --fault-injection-mode MODE        "delay", "error", "abort", or "crash" (default: delay).
-                                     "abort" fails the request so it can be resumed;
-                                     "crash" kills the pod process mid-turn.
-  --approval-required-tools LIST     Comma-separated tools that need human approval
-                                     (default: create_loan_application; empty disables).
-  --lease-seconds N                  Per-session lease; a crashed request can be retried
-                                     after it expires (default: 180).
-  --enable-reasoning                 Capture Bedrock extended-thinking in the audit trail.
-  --no-snapshot-history              Keep only the latest snapshot per agent.
-  --image-uri URI                    Deploy an image that is already in ECR and skip the
-                                     build and push (change settings in about 2 minutes).
-  --fault-injection-delay-seconds N  Delay used in "delay" mode (default: 5).
-  -h, --help                         Show this help.
+  --region REGION              AWS Region (default: us-west-2).
+  --profile PROFILE            AWS CLI profile; omit to use the default profile.
+  --service-access-cidr CIDR   CIDR allowed to invoke the mortgage-assistant API.
+  --session-ttl-seconds N      Short-term session retention (default: 604800).
+  --prompt TEXT                Smoke-test prompt.
+  --image-uri URI              Deploy an existing ECR image and skip build and push.
+  -h, --help                   Show this help.
 EOF
 }
 
@@ -62,15 +41,7 @@ while [[ $# -gt 0 ]]; do
     --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
     --session-ttl-seconds) SESSION_TTL_SECONDS="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
-    --fault-injection-enabled) FAULT_INJECTION_ENABLED="true"; shift ;;
-    --fault-injection-tool) FAULT_INJECTION_TOOL="$2"; shift 2 ;;
-    --fault-injection-mode) FAULT_INJECTION_MODE="$2"; shift 2 ;;
-    --approval-required-tools) APPROVAL_REQUIRED_TOOLS="$2"; shift 2 ;;
-    --lease-seconds) LEASE_SECONDS="$2"; shift 2 ;;
-    --enable-reasoning) ENABLE_REASONING="true"; shift ;;
-    --no-snapshot-history) SNAPSHOT_HISTORY="false"; shift ;;
     --image-uri) IMAGE_URI_OVERRIDE="$2"; shift 2 ;;
-    --fault-injection-delay-seconds) FAULT_INJECTION_DELAY_SECONDS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -86,27 +57,6 @@ done
 if [[ ! "$SESSION_TTL_SECONDS" =~ ^[0-9]+$ ]] ||
   [[ "$SESSION_TTL_SECONDS" -lt 3600 ]]; then
   echo "--session-ttl-seconds must be an integer of at least 3600." >&2
-  exit 2
-fi
-if [[ "$FAULT_INJECTION_MODE" != "delay" && "$FAULT_INJECTION_MODE" != "error" \
-  && "$FAULT_INJECTION_MODE" != "abort" && "$FAULT_INJECTION_MODE" != "crash" ]]; then
-  echo "--fault-injection-mode must be 'delay', 'error', 'abort', or 'crash'." >&2
-  exit 2
-fi
-if [[ ! "$LEASE_SECONDS" =~ ^[0-9]+$ || "$LEASE_SECONDS" -lt 30 ]]; then
-  echo "--lease-seconds must be an integer of at least 30." >&2
-  exit 2
-fi
-if [[ ! "$FAULT_INJECTION_TOOL" =~ ^[A-Za-z0-9_]+$ ]]; then
-  echo "--fault-injection-tool must be a tool name (letters, digits, underscores)." >&2
-  exit 2
-fi
-if [[ ! "$APPROVAL_REQUIRED_TOOLS" =~ ^[A-Za-z0-9_,]*$ ]]; then
-  echo "--approval-required-tools must be a comma-separated list of tool names." >&2
-  exit 2
-fi
-if [[ ! "$FAULT_INJECTION_DELAY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "--fault-injection-delay-seconds must be a non-negative number." >&2
   exit 2
 fi
 
@@ -153,7 +103,7 @@ if [[ -z "$KNOWLEDGE_BASE_ID" ]]; then
   exit 1
 fi
 
-# boto3 (pinned in uv.lock) instead of the AWS CLI: older CLI v2 releases omit VectorIndexes.
+# boto3 is used because older AWS CLI v2 releases omit VectorIndexes.
 MEMORY_CHECK_OPTIONS=(
   --table-name "$MEMORY_TABLE_NAME"
   --vector-index-name "$MEMORY_VECTOR_INDEX_NAME"
@@ -248,9 +198,7 @@ trap 'rm -f "$SERVICE_MANIFEST"' EXIT
 for template_variable in \
   IMAGE_URI REGION MODEL_ID KB_PARAMETER_NAME MEMORY_TABLE_NAME \
   MEMORY_VECTOR_INDEX_NAME MEMORY_EMBEDDING_MODEL_ID SESSION_TTL_SECONDS \
-  FAULT_INJECTION_ENABLED FAULT_INJECTION_TOOL FAULT_INJECTION_MODE \
-  FAULT_INJECTION_DELAY_SECONDS SERVICE_ACCESS_CIDR APPROVAL_REQUIRED_TOOLS \
-  LEASE_SECONDS ENABLE_REASONING SNAPSHOT_HISTORY; do
+  SERVICE_ACCESS_CIDR; do
   template_value="${!template_variable}"
   case "$template_value" in
     *'&'*|*'|'*|*'\'*|*$'\n'*|*$'\r'*)
@@ -269,14 +217,6 @@ sed \
   -e "s|__MEMORY_VECTOR_INDEX_NAME__|$MEMORY_VECTOR_INDEX_NAME|g" \
   -e "s|__MEMORY_EMBEDDING_MODEL_ID__|$MEMORY_EMBEDDING_MODEL_ID|g" \
   -e "s|__MEMORY_SESSION_TTL_SECONDS__|$SESSION_TTL_SECONDS|g" \
-  -e "s|__FAULT_INJECTION_ENABLED__|$FAULT_INJECTION_ENABLED|g" \
-  -e "s|__FAULT_INJECTION_TOOL__|$FAULT_INJECTION_TOOL|g" \
-  -e "s|__FAULT_INJECTION_MODE__|$FAULT_INJECTION_MODE|g" \
-  -e "s|__FAULT_INJECTION_DELAY_SECONDS__|$FAULT_INJECTION_DELAY_SECONDS|g" \
-  -e "s|__APPROVAL_REQUIRED_TOOLS__|$APPROVAL_REQUIRED_TOOLS|g" \
-  -e "s|__LEASE_SECONDS__|$LEASE_SECONDS|g" \
-  -e "s|__ENABLE_REASONING__|$ENABLE_REASONING|g" \
-  -e "s|__SNAPSHOT_HISTORY__|$SNAPSHOT_HISTORY|g" \
   -e "s|__SERVICE_ACCESS_CIDR__|$SERVICE_ACCESS_CIDR|g" \
   "$MODULE_DIR/k8s/service.template.yaml" > "$SERVICE_MANIFEST"
 
@@ -320,7 +260,6 @@ if [[ -z "$SERVICE_ENDPOINT" ]]; then
 fi
 
 echo "Waiting for the Lab 4 mortgage API readiness endpoint"
-# The NLB's DNS name and targets come up in stages, so require two successes in a row.
 READY_STREAK=0
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \
@@ -349,13 +288,10 @@ fi
 
 SMOKE_ACTOR="deployment-smoke-test"
 SMOKE_SESSION="session-$(date -u +%Y%m%d%H%M%S)"
-SMOKE_REQUEST="smoke-$(date -u +%Y%m%d%H%M%S)"
 PROMPT_JSON="$(python3 -c \
-  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3], "request_id": sys.argv[4]}))' \
-  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION" "$SMOKE_REQUEST")"
+  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3]}))' \
+  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION")"
 
-echo
-echo "Lab 4 smoke-test response:"
 SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error \
   --max-time 300 \
   --request POST \
@@ -363,49 +299,21 @@ SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer ${API_KEY}" \
   --header "Content-Type: application/json" \
   --data "$PROMPT_JSON")"
-echo "$SMOKE_RESPONSE"
-
-echo
-echo "Verifying the audit trail and idempotent replay for request ${SMOKE_REQUEST}:"
-SMOKE_TRAIL="$(curl --fail-with-body --silent --show-error \
-  --max-time 60 \
-  --get "http://${SERVICE_ENDPOINT}/executions/${SMOKE_REQUEST}" \
-  --data-urlencode "actor_id=${SMOKE_ACTOR}" \
-  --data-urlencode "session_id=${SMOKE_SESSION}" \
-  --header "Authorization: Bearer ${API_KEY}")"
-SMOKE_REPLAY="$(curl --fail-with-body --silent --show-error \
-  --max-time 60 \
-  --request POST \
-  "http://${SERVICE_ENDPOINT}/invoke" \
-  --header "Authorization: Bearer ${API_KEY}" \
-  --header "Content-Type: application/json" \
-  --data "$PROMPT_JSON")"
-python3 - "$SMOKE_TRAIL" "$SMOKE_RESPONSE" "$SMOKE_REPLAY" <<'PYEOF'
+python3 - "$SMOKE_RESPONSE" "$SMOKE_ACTOR" "$SMOKE_SESSION" <<'PYEOF'
 import json
 import sys
 
-trail, first, replay = (json.loads(value) for value in sys.argv[1:4])
-problems = []
-if not trail.get("chain_valid"):
-    problems.append("audit hash chain is not valid")
-if trail["execution"]["status"] != "COMPLETED":
-    problems.append(f"execution status is {trail['execution']['status']}")
-if not trail.get("records"):
-    problems.append("audit trail is empty")
-if replay.get("response") != first.get("response"):
-    problems.append("replaying the request_id did not return the stored response")
-if replay.get("attempt") != first.get("attempt"):
-    problems.append("replaying the request_id started a new attempt")
-if problems:
-    sys.exit("Lab 4 smoke verification failed: " + "; ".join(problems))
-print(
-    f"  audit records: {len(trail['records'])}, chain valid, "
-    f"route: {[step['agent'] for step in trail['explanation']['route']] or 'none'}"
-)
+response = json.loads(sys.argv[1])
+if response.get("actor_id") != sys.argv[2] or response.get("session_id") != sys.argv[3]:
+    raise SystemExit("Lab 4 smoke response returned unexpected actor or session context")
+if not response.get("request_id") or not isinstance(response.get("response"), str):
+    raise SystemExit("Lab 4 smoke response is missing request_id or response")
+if not isinstance(response.get("duration_ms"), int):
+    raise SystemExit("Lab 4 smoke response is missing duration_ms")
+print(response["response"])
 PYEOF
 
 cat <<EOF
-
 
 Lab 4 completed.
   EKS cluster: $CLUSTER_NAME
@@ -413,15 +321,15 @@ Lab 4 completed.
   Vector index: $MEMORY_VECTOR_INDEX_NAME
   Image: $IMAGE_URI
   Mortgage-assistant API endpoint: http://${SERVICE_ENDPOINT}
-  Smoke-test request ID: $SMOKE_REQUEST (session $SMOKE_SESSION)
+  Smoke-test session: $SMOKE_SESSION
 
-The mortgage-assistant API key Secret was reused (or created if missing) and
-was not printed.
+The source-restricted Network Load Balancer and bearer authentication remain
+enabled. The API key Secret was reused or created and was not printed.
 
-Try it (from 04-memory):
-  uv run app/invoke_eks.py --region $REGION --prompt \\
+Try it from 04-memory:
+  uv run app/invoke_eks.py --region $REGION --prompt \
     "What is the balance on customer ID 123456's mortgage?"
-  uv run app/invoke_eks.py --region $REGION --trail last
 
-To change settings without rebuilding, rerun with: --image-uri $IMAGE_URI
+To reuse this image without rebuilding:
+  ./scripts/deploy-memory.sh --region $REGION --image-uri $IMAGE_URI
 EOF

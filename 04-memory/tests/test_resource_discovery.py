@@ -29,9 +29,7 @@ hydrate_memory = load_hydrate_memory()
 class ResourceDiscoveryTests(unittest.TestCase):
     def test_inspector_reads_canonical_ssm_parameter(self) -> None:
         ssm_client = Mock()
-        ssm_client.get_parameter.return_value = {
-            "Parameter": {"Value": " memory-table "}
-        }
+        ssm_client.get_parameter.return_value = {"Parameter": {"Value": " memory-table "}}
         value = inspect_memory.ssm_parameter(
             ssm_client,
             inspect_memory.MEMORY_TABLE_PARAMETER_NAME,
@@ -43,9 +41,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
 
     def test_hydrator_reads_canonical_ssm_parameter(self) -> None:
         ssm_client = Mock()
-        ssm_client.get_parameter.return_value = {
-            "Parameter": {"Value": " vector-index "}
-        }
+        ssm_client.get_parameter.return_value = {"Parameter": {"Value": " vector-index "}}
         value = hydrate_memory.ssm_parameter(
             ssm_client,
             hydrate_memory.MEMORY_VECTOR_INDEX_PARAMETER_NAME,
@@ -111,9 +107,8 @@ class ResourceDiscoveryTests(unittest.TestCase):
         )
         for parameter_path in canonical:
             self.assertIn(parameter_path, deploy)
-        # Lab 4 reads exactly the five Labs 0-3 parameters and nothing else.
         self.assertEqual(
-            sorted(set(re.findall(r'"(/workshop/mortgage-assistant/[^"]+)"', deploy))),
+            sorted(set(re.findall(r'"(/workshop/mortgage-assistant/[^\"]+)"', deploy))),
             sorted(canonical),
         )
         self.assertIn("lab04-agent-", deploy)
@@ -124,23 +119,30 @@ class ResourceDiscoveryTests(unittest.TestCase):
         self.assertNotIn("API key: $API_KEY", deploy)
         self.assertIn("cannot be rendered safely", deploy)
         self.assertIn("unresolved template placeholders", deploy)
-        for placeholder in (
-            "__FAULT_INJECTION_ENABLED__",
-            "__FAULT_INJECTION_TOOL__",
-            "__FAULT_INJECTION_MODE__",
-            "__FAULT_INJECTION_DELAY_SECONDS__",
-        ):
-            self.assertIn(placeholder, deploy)
 
-    def test_deploy_has_no_observability_or_mcp_dependencies(self) -> None:
+    def test_deploy_has_no_operational_observability_or_mcp_features(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-memory.sh").read_text().lower()
-        for absent in ("langfuse", "otel", "otlp", "telemetry", "credit", "mcp", "trace_id"):
+        for absent in (
+            "langfuse",
+            "otel",
+            "otlp",
+            "telemetry",
+            "credit",
+            "mcp",
+            "trace_id",
+            "fault_injection",
+            "approval",
+            "lease_seconds",
+            "snapshot_history",
+            "/executions/",
+        ):
             self.assertNotIn(absent, deploy)
 
     def test_cleanup_removes_only_the_application_namespace(self) -> None:
         cleanup = (MODULE_DIR / "scripts" / "cleanup-memory.sh").read_text()
         self.assertIn("kubectl delete namespace mortgage-assistant", cleanup)
         self.assertNotIn("credit-services", cleanup)
+        self.assertNotIn("dynamodb delete", cleanup.lower())
 
     def test_python_utilities_create_one_reusable_ssm_client(self) -> None:
         for path in (

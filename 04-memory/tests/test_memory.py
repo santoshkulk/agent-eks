@@ -1,8 +1,11 @@
+import io
+import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -31,7 +34,7 @@ class MemoryConfigurationTests(unittest.TestCase):
 
     @patch("memory.SnapshotSessionManager")
     @patch("memory.DynamoDBStorage")
-    def test_session_manager_is_message_level_with_ttl_and_history(
+    def test_session_manager_is_latest_only_message_level_with_ttl(
         self,
         storage_class,
         session_manager_class,
@@ -49,8 +52,8 @@ class MemoryConfigurationTests(unittest.TestCase):
             "session-1",
             storage=session_storage,
             save_latest_on="message",
-            snapshot_trigger=memory._snapshot_trigger,
         )
+        self.assertNotIn("snapshot_trigger", session_manager_class.call_args.kwargs)
 
     @patch("memory.MemoryManager")
     @patch("memory.DynamoDBMemoryStore")
@@ -72,6 +75,58 @@ class MemoryConfigurationTests(unittest.TestCase):
             partition="user/participant-1",
         )
         memory_manager_class.assert_called_once()
+
+    @patch("memory.get_bedrock_runtime_client")
+    def test_embedding_is_titan_1024_dimensions_and_normalized(self, get_client) -> None:
+        get_client.return_value.invoke_model.return_value = {
+            "body": io.BytesIO(json.dumps({"embedding": [0.0] * 1024}).encode())
+        }
+
+        self.assertEqual(len(memory.embed_text("fixed rate")), 1024)
+
+        call = get_client.return_value.invoke_model.call_args.kwargs
+        self.assertEqual(call["modelId"], "amazon.titan-embed-text-v2:0")
+        self.assertEqual(
+            json.loads(call["body"]),
+            {"inputText": "fixed rate", "dimensions": 1024, "normalize": True},
+        )
+
+
+class DurableMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
+    @patch("memory.embed_text", return_value=[0.1] * 1024)
+    async def test_vector_search_is_scoped_to_actor_partition(self, _) -> None:
+        storage = MagicMock()
+        storage.search = AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    data=b"prefers a 15-year term",
+                    metadata={"kind": "preference"},
+                )
+            ]
+        )
+        store = memory.DynamoDBMemoryStore(storage, "user/actor-1")
+
+        results = await store.search("preferred term")
+
+        query = storage.search.call_args.args[0]
+        self.assertEqual(query.pk, "user/actor-1")
+        self.assertEqual(query.top_k, memory.MEMORY_MAX_SEARCH_RESULTS)
+        self.assertTrue(query.include_values)
+        self.assertEqual(results[0].content, "prefers a 15-year term")
+
+    @patch("memory.embed_text", return_value=[0.1] * 1024)
+    @patch("memory.uuid.uuid4")
+    async def test_memory_add_uses_uuid_key(self, uuid4, _) -> None:
+        uuid4.return_value.hex = "a" * 32
+        storage = MagicMock()
+        storage.write = AsyncMock()
+        store = memory.DynamoDBMemoryStore(storage, "user/actor-1")
+
+        await store.add("  prefers a fixed rate  ", {"kind": "preference"})
+
+        self.assertEqual(storage.write.call_args.args[0], f"memories/{'a' * 32}")
+        self.assertEqual(storage.write.call_args.args[1], b"prefers a fixed rate")
+        self.assertNotIn("ttl_seconds", storage.write.call_args.kwargs)
 
 
 if __name__ == "__main__":

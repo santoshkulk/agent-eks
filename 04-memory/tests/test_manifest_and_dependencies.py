@@ -14,10 +14,11 @@ class ManifestAndDependencyTests(unittest.TestCase):
         self.assertNotIn("mcp", project)
         self.assertNotIn("otel", project)
 
-    def test_manifest_has_resume_settings_and_hardening(self) -> None:
+    def test_manifest_preserves_availability_security_and_memory_env(self) -> None:
         manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
         for expected in (
             "replicas: 2",
+            "maxUnavailable: 0",
             "serviceAccountName: mortgage-assistant",
             "automountServiceAccountToken: false",
             "runAsNonRoot: true",
@@ -29,68 +30,77 @@ class ManifestAndDependencyTests(unittest.TestCase):
             "sizeLimit: 256Mi",
             "kind: PodDisruptionBudget",
             "minAvailable: 1",
-            "kind: Service",
             "type: LoadBalancer",
-            "name: FAULT_INJECTION_ENABLED",
+            "loadBalancerSourceRanges:",
+            "name: MEMORY_SESSION_TTL_SECONDS",
+            "name: MORTGAGE_API_KEY",
         ):
             self.assertIn(expected, manifest)
-        for absent in ("CREDIT_SCORE", "OTEL_", "TELEMETRY", "langfuse"):
+        for absent in (
+            "FAULT_INJECTION",
+            "APPROVAL",
+            "LEASE_SECONDS",
+            "ENABLE_REASONING",
+            "SNAPSHOT_HISTORY",
+            "CREDIT_SCORE",
+            "OTEL_",
+            "TELEMETRY",
+            "langfuse",
+        ):
             self.assertNotIn(absent, manifest)
 
-    def test_container_is_locked_and_non_root(self) -> None:
+    def test_container_is_locked_non_root_and_private_to_the_service_boundary(self) -> None:
         dockerfile = (MODULE_DIR / "Dockerfile").read_text()
         self.assertIn("uv sync --frozen --no-install-project", dockerfile)
         self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn('CMD ["--host", "0.0.0.0"', dockerfile)
         self.assertNotIn("credit_score_mcp", dockerfile)
         self.assertNotIn("telemetry", dockerfile)
 
-    def test_container_copies_every_runtime_module(self) -> None:
+    def test_container_copies_complete_reduced_runtime_closure(self) -> None:
         dockerfile = (MODULE_DIR / "Dockerfile").read_text()
-        # Everything the API imports transitively must be in the image.
-        runtime = {
-            "approvals", "audit", "execution", "ledger", "memory",
-            "mortgage_agent", "mortgage_api", "resilience", "service", "store",
-        }
+        runtime = {"memory", "mortgage_agent", "mortgage_api", "resilience"}
         for module in runtime:
             self.assertIn(f"app/{module}.py", dockerfile)
+        for removed in (
+            "approvals",
+            "audit",
+            "execution",
+            "ledger",
+            "service",
+            "store",
+        ):
+            self.assertNotIn(f"app/{removed}.py", dockerfile)
+
         local = {path.stem for path in (MODULE_DIR / "app").glob("*.py")}
         for module in runtime:
             source = (MODULE_DIR / "app" / f"{module}.py").read_text()
-            for other in local - runtime - {"inspect_memory", "invoke_eks", "inspect_audit"}:
+            for other in local - runtime - {"inspect_memory", "invoke_eks"}:
                 self.assertNotIn(f"import {other}", source)
                 self.assertNotIn(f"from {other} import", source)
 
-    def test_manifest_and_deploy_script_agree_on_resume_settings(self) -> None:
-        manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
+    def test_deploy_smoke_request_uses_reduced_contract(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-memory.sh").read_text()
-        for variable in (
+        self.assertIn('"prompt": sys.argv[1]', deploy)
+        self.assertIn('"actor_id": sys.argv[2]', deploy)
+        self.assertIn('"session_id": sys.argv[3]', deploy)
+        self.assertIn("curl --fail-with-body", deploy)
+        self.assertIn('response.get("duration_ms")', deploy)
+        for absent in (
+            "request_id\": sys.argv[4]",
+            "/executions/",
+            "chain_valid",
+            "replay",
+            "FAULT_INJECTION",
             "APPROVAL_REQUIRED_TOOLS",
             "LEASE_SECONDS",
             "ENABLE_REASONING",
             "SNAPSHOT_HISTORY",
         ):
-            self.assertIn(f"name: {variable}", manifest)
-            self.assertIn(f"__{variable}__", manifest)
-            self.assertIn(f's|__{variable}__|', deploy)
-
-    def test_deploy_smoke_test_verifies_audit_chain_and_replay(self) -> None:
-        deploy = (MODULE_DIR / "scripts" / "deploy-memory.sh").read_text()
-        self.assertIn("chain_valid", deploy)
-        self.assertIn("/executions/", deploy)
-        self.assertIn("replaying the request_id", deploy)
-
-    def test_no_new_iam_actions_are_needed(self) -> None:
-        # Audit, execution, and ledger use only GetItem/PutItem/Query on the existing
-        # table, which the lab 0 pod role already allows.
-        source = (MODULE_DIR / "app" / "store.py").read_text()
-        for call in ("get_item", "put_item", "query"):
-            self.assertIn(f".{call}(", source)
-        for forbidden in ("update_item", "delete_item", "scan(", "batch_write"):
-            self.assertNotIn(forbidden, source)
+            self.assertNotIn(absent, deploy)
 
     def test_checkpoint_has_no_cross_lab_imports(self) -> None:
         source = "\n".join(path.read_text() for path in (MODULE_DIR / "app").glob("*.py"))
-        self.assertNotIn("04-memory", source)
         self.assertNotIn("05-observability", source)
         self.assertNotIn("06-mcp-credit-score", source)
         self.assertNotIn("sys.path", source)

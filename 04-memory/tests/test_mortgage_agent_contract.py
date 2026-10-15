@@ -1,16 +1,20 @@
-"""Contracts for grounded retrieval, synthetic fixtures, and specialist identity."""
+"""Contracts for grounded retrieval, synthetic fixtures, and agent boundaries."""
 
 import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
+
+from strands.hooks import BeforeInvocationEvent
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
 
 import mortgage_agent  # noqa: E402
+from resilience import CurrentPromptHook  # noqa: E402
 
 
 class KnowledgeBaseConfigurationTests(unittest.TestCase):
@@ -123,8 +127,8 @@ class SyntheticFixtureTests(unittest.TestCase):
                 mortgage_agent.create_loan_application(*arguments)
 
 
-class SpecialistContractTests(unittest.TestCase):
-    def test_display_names_change_while_agent_ids_stay_stable(self) -> None:
+class AgentContractTests(unittest.TestCase):
+    def test_names_ids_prompts_and_tool_boundaries_stay_stable(self) -> None:
         self.assertEqual(
             {name: spec["agent_id"] for name, spec in mortgage_agent.SPECIALISTS.items()},
             {
@@ -133,33 +137,35 @@ class SpecialistContractTests(unittest.TestCase):
                 "mortgage_application_specialist": "new_application",
             },
         )
-        education_tools = mortgage_agent.SPECIALISTS["mortgage_education_specialist"][
-            "tools"
-        ]
-        self.assertEqual(education_tools, [mortgage_agent.retrieve_mortgage_knowledge])
+        self.assertEqual(
+            mortgage_agent.SPECIALISTS["mortgage_education_specialist"]["tools"],
+            [mortgage_agent.retrieve_mortgage_knowledge],
+        )
+        self.assertIn("Routing rationale:", mortgage_agent.SUPERVISOR_PROMPT)
+        self.assertIn("retrieve_mortgage_knowledge exactly once", mortgage_agent.GENERAL_PROMPT)
+        application_prompt = " ".join(mortgage_agent.NEW_APPLICATION_PROMPT.split())
+        self.assertIn("never ask for a supplied field again", application_prompt)
+        self.assertIn("one question at a time", application_prompt)
+        self.assertIn("before the corresponding tool executes successfully", application_prompt)
 
-    def test_specialist_keeps_persistent_as_tool_contract(self) -> None:
-        session_manager = MagicMock()
+    def test_specialist_is_agent_as_tool_without_memory_managers(self) -> None:
         wrapped_tool = MagicMock()
         agent_instance = MagicMock()
         agent_instance.as_tool.return_value = wrapped_tool
         with patch("mortgage_agent.Agent", return_value=agent_instance) as agent:
             result = mortgage_agent.create_specialist_tool(
                 "mortgage_application_specialist",
-                "actor-1",
-                "session-1",
                 model=MagicMock(),
-                session_factory=lambda: session_manager,
             )
 
         configuration = agent.call_args.kwargs
         self.assertEqual(configuration["agent_id"], "new_application")
-        self.assertIs(configuration["session_manager"], session_manager)
+        self.assertNotIn("session_manager", configuration)
+        self.assertNotIn("memory_manager", configuration)
         self.assertIs(
             configuration["structured_output_model"],
             mortgage_agent.SpecialistReport,
         )
-        self.assertIsNone(configuration["callback_handler"])
         agent_instance.as_tool.assert_called_once_with(
             name="mortgage_application_specialist",
             description=configuration["description"],
@@ -167,12 +173,32 @@ class SpecialistContractTests(unittest.TestCase):
         )
         self.assertIs(result, wrapped_tool)
 
-    def test_application_prompt_preserves_multiturn_collection_and_safe_claims(self) -> None:
-        prompt = " ".join(mortgage_agent.NEW_APPLICATION_PROMPT.split())
-        self.assertIn("never ask for a supplied field again", prompt)
-        self.assertIn("one question at a time", prompt)
-        self.assertIn("annual expenses", prompt)
-        self.assertIn("before the corresponding tool executes successfully", prompt)
+    def test_only_supervisor_receives_one_session_and_memory_manager(self) -> None:
+        session_manager = object()
+        memory_manager = object()
+        supervisor = MagicMock()
+        with (
+            patch("mortgage_agent.create_specialist_tool", return_value=MagicMock()),
+            patch("mortgage_agent.create_session_manager", return_value=session_manager) as sessions,
+            patch("mortgage_agent.create_memory_manager", return_value=memory_manager) as memories,
+            patch("mortgage_agent.Agent", return_value=supervisor) as agent,
+        ):
+            result = mortgage_agent.create_supervisor_agent("actor-1", "session-1")
+
+        sessions.assert_called_once_with("actor-1", "session-1")
+        memories.assert_called_once_with("actor-1")
+        configuration = agent.call_args.kwargs
+        self.assertEqual(configuration["name"], "mortgage_supervisor")
+        self.assertEqual(configuration["agent_id"], "supervisor")
+        self.assertIs(configuration["session_manager"], session_manager)
+        self.assertIs(configuration["memory_manager"], memory_manager)
+        self.assertIs(result, supervisor)
+
+    def test_current_prompt_hook_replaces_restored_prompt(self) -> None:
+        agent = SimpleNamespace(system_prompt="stored old prompt")
+        hook = CurrentPromptHook("currently deployed prompt")
+        hook._before_invocation(BeforeInvocationEvent(agent=agent, messages=[]))
+        self.assertEqual(agent.system_prompt, "currently deployed prompt")
 
 
 if __name__ == "__main__":
