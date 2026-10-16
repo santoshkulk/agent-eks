@@ -1,19 +1,14 @@
 import os
 from pathlib import Path
 import sys
+import threading
 import unittest
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
-os.environ.setdefault(
-    "KB_PARAMETER_NAME",
-    "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
-)
-os.environ.setdefault("AWS_REGION", "us-west-2")
 os.environ.setdefault("MEMORY_TABLE_NAME", "test-memory-table")
 os.environ.setdefault("MORTGAGE_API_KEY", "test-api-key")
 os.environ.setdefault(
@@ -23,36 +18,12 @@ os.environ.setdefault(
 
 import mortgage_agent  # noqa: E402
 import mortgage_api  # noqa: E402
-from execution import COMPLETED, INTERRUPTED, Execution, SessionBusy  # noqa: E402
-from service import Outcome  # noqa: E402
 
 
 class ApiContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(mortgage_api.app)
         self.headers = {"Authorization": "Bearer test-api-key"}
-
-    def test_canonical_model_and_configured_knowledge_base_parameter(self) -> None:
-        self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-4-6")
-        self.assertEqual(
-            mortgage_agent.KB_PARAMETER_NAME,
-            "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
-        )
-
-    def _orchestrator(self, outcome=None, error=None):
-        orchestrator = MagicMock()
-        if error is not None:
-            orchestrator.invoke.side_effect = error
-        else:
-            orchestrator.invoke.return_value = outcome
-        orchestrator.explanation.return_value = {"route": [], "records": 3}
-        return orchestrator
-
-    def _make_outcome(self, status=COMPLETED, response="remembered response", interrupts=None):
-        execution = Execution(
-            "participant-123456789012", "session-1", "req-1", 1, status, "p", "h"
-        )
-        return Outcome(execution, response=response, interrupts=interrupts or [])
 
     def _body(self, **extra):
         return {
@@ -62,136 +33,125 @@ class ApiContractTests(unittest.TestCase):
             **extra,
         }
 
-    def test_invoke_returns_context_explanation_and_uses_client_request_id(self) -> None:
-        orchestrator = self._orchestrator(self._make_outcome())
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post(
-                "/invoke", headers=self.headers, json=self._body(request_id="req-1")
-            )
+    @patch("mortgage_api.telemetry.current_trace_id", return_value="a" * 32)
+    @patch("mortgage_api.uuid.uuid4", return_value="generated-request")
+    @patch("mortgage_api.run_supervisor", return_value="remembered response")
+    def test_invoke_returns_reduced_traced_contract(self, run, _, __) -> None:
+        response = self.client.post("/invoke", headers=self.headers, json=self._body())
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["status"], "completed")
-        self.assertEqual(body["response"], "remembered response")
-        self.assertEqual(body["explanation"]["records"], 3)
-        self.assertIn("trace_id", body)
-        orchestrator.invoke.assert_called_once_with(
+        self.assertEqual(
+            set(body),
+            {"request_id", "actor_id", "session_id", "response", "duration_ms", "trace_id"},
+        )
+        self.assertEqual(body["request_id"], "generated-request")
+        self.assertEqual(body["trace_id"], "a" * 32)
+        run.assert_called_once_with(
+            "What did I tell you?",
             "participant-123456789012",
             "session-1",
-            "req-1",
-            "What did I tell you?",
-            ANY,
+            "generated-request",
         )
 
-    def test_invoke_generates_request_id_when_absent(self) -> None:
-        orchestrator = self._orchestrator(self._make_outcome())
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
+    @patch("mortgage_api.run_supervisor", return_value="ok")
+    def test_root_span_has_safe_name_and_correlation_attributes(self, _) -> None:
+        context_manager = MagicMock()
+        with (
+            patch("mortgage_api.uuid.uuid4", return_value="request-1"),
+            patch("mortgage_api.telemetry.start_request_span", return_value=context_manager) as span,
+        ):
             self.client.post("/invoke", headers=self.headers, json=self._body())
-        self.assertTrue(orchestrator.invoke.call_args.args[2])
-
-    @patch("mortgage_api.telemetry.current_trace_id", return_value="a" * 32)
-    def test_invoke_returns_active_trace_id(self, _) -> None:
-        orchestrator = self._orchestrator(self._make_outcome())
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post("/invoke", headers=self.headers, json=self._body())
-        self.assertEqual(response.json()["trace_id"], "a" * 32)
-
-    def test_pending_approval_returns_202_with_interrupts(self) -> None:
-        interrupts = [{"id": "i-1", "name": "approve_create_loan_application", "reason": {}}]
-        orchestrator = self._orchestrator(
-            self._make_outcome(status=INTERRUPTED, response=None, interrupts=interrupts)
+        span.assert_called_once_with(
+            "mortgage_assistant.invoke",
+            {
+                "session.id": "session-1",
+                "user.id": "participant-123456789012",
+                "tags": ["mortgage-assistant", "request:request-1"],
+            },
         )
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post("/invoke", headers=self.headers, json=self._body())
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["status"], "awaiting_approval")
-        self.assertEqual(response.json()["interrupts"], interrupts)
 
-    def test_session_conflict_returns_409(self) -> None:
-        orchestrator = self._orchestrator(error=SessionBusy("session busy"))
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post("/invoke", headers=self.headers, json=self._body())
-        self.assertEqual(response.status_code, 409)
+    @patch("mortgage_api.telemetry.current_trace_id", return_value=None)
+    @patch("mortgage_api.run_supervisor", return_value="ok")
+    def test_telemetry_disabled_returns_nullable_trace_id(self, _, __) -> None:
+        response = self.client.post("/invoke", headers=self.headers, json=self._body())
+        self.assertIsNone(response.json()["trace_id"])
 
-    def test_failure_returns_safe_error_that_names_the_resume_key(self) -> None:
-        orchestrator = self._orchestrator(error=RuntimeError("provider unavailable"))
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post(
-                "/invoke", headers=self.headers, json=self._body(request_id="req-9")
-            )
+    @patch("mortgage_api.run_supervisor", side_effect=RuntimeError("provider secret"))
+    def test_failure_returns_safe_error_with_correlation_id(self, _) -> None:
+        with patch("mortgage_api.uuid.uuid4", return_value="generated-request"):
+            response = self.client.post("/invoke", headers=self.headers, json=self._body())
         self.assertEqual(response.status_code, 500)
-        self.assertIn("request_id=req-9", response.json()["detail"])
-        self.assertNotIn("provider unavailable", response.text)
+        self.assertIn("request_id=generated-request", response.json()["detail"])
+        self.assertNotIn("provider secret", response.text)
+        self.assertNotIn("resume", response.text.lower())
 
-    def test_approvals_endpoint_passes_decisions(self) -> None:
-        orchestrator = self._orchestrator()
-        orchestrator.decide.return_value = self._make_outcome()
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            response = self.client.post(
-                "/executions/req-1/approvals",
-                headers=self.headers,
-                json={
-                    "actor_id": "participant-123456789012",
-                    "session_id": "session-1",
-                    "decisions": [
-                        {"interrupt_id": "i-1", "approved": True, "reviewer": "pat"}
-                    ],
-                },
-            )
-        self.assertEqual(response.status_code, 200)
-        decisions = orchestrator.decide.call_args.args[3]
-        self.assertEqual(decisions[0]["interrupt_id"], "i-1")
-        self.assertTrue(decisions[0]["approved"])
-
-    def test_trail_endpoint_requires_auth_and_scopes_by_actor(self) -> None:
-        orchestrator = self._orchestrator()
-        orchestrator.trail.return_value = {"chain_valid": True, "records": []}
-        params = {"actor_id": "participant-123456789012", "session_id": "session-1"}
-        with patch("mortgage_api.get_orchestrator", return_value=orchestrator):
-            self.assertEqual(
-                self.client.get("/executions/req-1", params=params).status_code, 401
-            )
-            ok = self.client.get("/executions/req-1", params=params, headers=self.headers)
-        self.assertEqual(ok.status_code, 200)
-        orchestrator.trail.assert_called_once_with(
-            "participant-123456789012", "session-1", "req-1"
+    def test_missing_invalid_and_non_ascii_tokens_are_rejected(self) -> None:
+        self.assertEqual(self.client.post("/invoke", json=self._body()).status_code, 401)
+        self.assertEqual(
+            self.client.post(
+                "/invoke", headers={"Authorization": "Bearer incorrect"}, json=self._body()
+            ).status_code,
+            401,
         )
-
-    def test_missing_or_invalid_bearer_token_is_rejected(self) -> None:
-        request = {
-            "prompt": "Hello",
-            "actor_id": "participant-123456789012",
-            "session_id": "session-1",
-        }
-        self.assertEqual(self.client.post("/invoke", json=request).status_code, 401)
         self.assertEqual(
             self.client.post(
                 "/invoke",
-                headers={"Authorization": "Bearer incorrect"},
-                json=request,
+                headers={"Authorization": "Bearer ключ".encode("utf-8")},
+                json=self._body(),
             ).status_code,
             401,
         )
 
-    def test_invalid_actor_is_rejected(self) -> None:
-        response = self.client.post(
-            "/invoke",
-            headers=self.headers,
-            json={
-                "prompt": "Hello",
-                "actor_id": "participant/other",
-                "session_id": "session-1",
-            },
-        )
-        self.assertEqual(response.status_code, 422)
+    def test_inputs_are_bounded_and_client_request_id_is_forbidden(self) -> None:
+        for body in (
+            self._body(prompt=""),
+            self._body(prompt="x" * 4001),
+            self._body(actor_id="participant/other"),
+            self._body(session_id="x" * 129),
+            self._body(request_id="removed-client-id"),
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(
+                    self.client.post("/invoke", headers=self.headers, json=body).status_code,
+                    422,
+                )
 
+    def test_agent_slots_are_capped_with_429(self) -> None:
+        slots = threading.BoundedSemaphore(1)
+        slots.acquire()
+        with patch.object(mortgage_api, "AGENT_SLOTS", slots):
+            response = self.client.post("/invoke", json=self._body(), headers=self.headers)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "5")
+
+    def test_only_health_readiness_and_invoke_routes_exist(self) -> None:
+        routes = {
+            (route.path, method)
+            for route in mortgage_api.app.routes
+            for method in getattr(route, "methods", set())
+            if route.path not in {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+        }
+        self.assertEqual(
+            routes,
+            {("/health", "GET"), ("/health/ready", "GET"), ("/invoke", "POST")},
+        )
+
+    @patch("mortgage_api.get_credit_score_mcp_url", return_value="fixed-provider")
     @patch("mortgage_api.get_knowledge_base_id", return_value="kb-test")
-    def test_readiness_reports_mcp_without_live_discovery_or_url(self, _) -> None:
-        response = self.client.get("/health/ready")
+    def test_readiness_reports_configured_without_url_or_live_discovery(
+        self, _, validate_url
+    ) -> None:
+        with patch("credit_score_mcp.MCPClient") as mcp_client:
+            response = self.client.get("/health/ready")
         self.assertEqual(response.status_code, 200)
         body = response.json()
+        self.assertEqual(body["knowledge_base_id"], "kb-test")
+        self.assertEqual(body["memory_table"], "test-memory-table")
         self.assertEqual(body["credit_score_mcp"], "configured")
         self.assertNotIn("credit_score_mcp_url", body)
-        self.assertNotIn("credit-score.test", response.text)
+        self.assertNotIn("fixed-provider", response.text)
+        validate_url.assert_called_once_with()
+        mcp_client.assert_not_called()
 
 
 if __name__ == "__main__":

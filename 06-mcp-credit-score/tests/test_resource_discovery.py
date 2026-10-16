@@ -132,12 +132,19 @@ class ResourceDiscoveryTests(unittest.TestCase):
             "__CREDIT_SCORE_MCP_URL__",
             "__OTEL_EXPORTER_OTLP_ENDPOINT__",
             "__TELEMETRY_MASK_CONTENT__",
+        ):
+            self.assertIn(placeholder, deploy)
+        for removed in (
             "__FAULT_INJECTION_ENABLED__",
             "__FAULT_INJECTION_TOOL__",
             "__FAULT_INJECTION_MODE__",
             "__FAULT_INJECTION_DELAY_SECONDS__",
+            "__APPROVAL_REQUIRED_TOOLS__",
+            "__LEASE_SECONDS__",
+            "__ENABLE_REASONING__",
+            "__SNAPSHOT_HISTORY__",
         ):
-            self.assertIn(placeholder, deploy)
+            self.assertNotIn(removed, deploy)
 
     def test_scripts_do_not_own_credit_services(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-mcp-integration.sh").read_text()

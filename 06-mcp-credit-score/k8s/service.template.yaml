@@ -65,22 +65,6 @@ spec:
               value: mortgage-assistant
             - name: TELEMETRY_MASK_CONTENT
               value: "__TELEMETRY_MASK_CONTENT__"
-            - name: FAULT_INJECTION_ENABLED
-              value: "__FAULT_INJECTION_ENABLED__"
-            - name: FAULT_INJECTION_TOOL
-              value: "__FAULT_INJECTION_TOOL__"
-            - name: FAULT_INJECTION_MODE
-              value: "__FAULT_INJECTION_MODE__"
-            - name: FAULT_INJECTION_DELAY_SECONDS
-              value: "__FAULT_INJECTION_DELAY_SECONDS__"
-            - name: APPROVAL_REQUIRED_TOOLS
-              value: "__APPROVAL_REQUIRED_TOOLS__"
-            - name: LEASE_SECONDS
-              value: "__LEASE_SECONDS__"
-            - name: ENABLE_REASONING
-              value: "__ENABLE_REASONING__"
-            - name: SNAPSHOT_HISTORY
-              value: "__SNAPSHOT_HISTORY__"
             - name: MORTGAGE_API_KEY
               valueFrom:
                 secretKeyRef:

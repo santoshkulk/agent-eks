@@ -180,38 +180,5 @@ class TraceContextTests(unittest.TestCase):
                 raise ValueError("boom")
 
 
-class FaultInjectionTests(unittest.TestCase):
-    def test_disabled_by_default_is_no_op(self) -> None:
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FAULT_INJECTION_ENABLED", None)
-            mortgage_agent.maybe_inject_fault("get_mortgage_details")
-
-    def test_error_mode_raises_for_targeted_tool(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "FAULT_INJECTION_ENABLED": "true",
-                "FAULT_INJECTION_TOOL": "get_mortgage_details",
-                "FAULT_INJECTION_MODE": "error",
-            },
-        ):
-            with self.assertRaises(RuntimeError):
-                mortgage_agent.maybe_inject_fault("get_mortgage_details")
-
-    @patch("mortgage_agent.time.sleep")
-    def test_delay_mode_uses_configured_duration(self, sleep) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "FAULT_INJECTION_ENABLED": "true",
-                "FAULT_INJECTION_TOOL": "get_mortgage_details",
-                "FAULT_INJECTION_MODE": "delay",
-                "FAULT_INJECTION_DELAY_SECONDS": "3",
-            },
-        ):
-            mortgage_agent.maybe_inject_fault("get_mortgage_details")
-        sleep.assert_called_once_with(3.0)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -10,9 +10,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-COPY app/approvals.py app/audit.py app/credit_score_mcp.py app/execution.py \
-     app/ledger.py app/memory.py app/mortgage_agent.py app/mortgage_api.py \
-     app/resilience.py app/service.py app/store.py app/telemetry.py ./
+COPY app/credit_score_mcp.py app/memory.py app/mortgage_agent.py \
+     app/mortgage_api.py app/resilience.py app/telemetry.py ./
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
