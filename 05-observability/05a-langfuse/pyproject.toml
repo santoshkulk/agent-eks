@@ -1,7 +1,7 @@
 [project]
 name = "mortgage-workshop-lab-05"
 version = "0.1.0"
-description = "Add OpenTelemetry/Langfuse tracing to the audited, resumable multi-agent EKS mortgage assistant"
+description = "Add OpenTelemetry/Langfuse tracing to the supervisor-persisted, actor-scoped-memory EKS mortgage assistant"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.94,<2",

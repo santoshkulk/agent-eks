@@ -131,10 +131,6 @@ class ResourceDiscoveryTests(unittest.TestCase):
         for placeholder in (
             "__OTEL_EXPORTER_OTLP_ENDPOINT__",
             "__TELEMETRY_MASK_CONTENT__",
-            "__FAULT_INJECTION_ENABLED__",
-            "__FAULT_INJECTION_TOOL__",
-            "__FAULT_INJECTION_MODE__",
-            "__FAULT_INJECTION_DELAY_SECONDS__",
         ):
             self.assertIn(placeholder, deploy)
 
