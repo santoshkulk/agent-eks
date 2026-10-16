@@ -125,11 +125,15 @@ def current_trace_attributes() -> dict[str, object] | None:
 
 
 def current_trace_id() -> str | None:
-    """Return the 32-hex-character trace ID of the active span, if any."""
-    context = trace.get_current_span().get_span_context()
-    if context is None or context.trace_id == 0:
+    """Return the active trace ID without allowing telemetry failures to escape."""
+    try:
+        context = trace.get_current_span().get_span_context()
+        if context is None or context.trace_id == 0:
+            return None
+        return format(context.trace_id, "032x")
+    except Exception:
+        logger.exception("Failed to read the active telemetry trace ID.")
         return None
-    return format(context.trace_id, "032x")
 
 
 class _SafeSpan(AbstractContextManager):
@@ -191,17 +195,6 @@ def start_request_span(
     a real exporter first.
     """
     return _SafeSpan(name, attributes)
-
-
-def record_fault_injection(tool_name: str, mode: str) -> None:
-    """Add a visible marker to the active span when a fault is injected."""
-    try:
-        trace.get_current_span().add_event(
-            "fault_injection",
-            {"tool.name": tool_name, "fault.mode": mode},
-        )
-    except Exception:
-        logger.debug("Unable to record fault-injection span event.")
 
 
 def shutdown_telemetry() -> None:

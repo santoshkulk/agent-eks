@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Lab 5b: the Lab 5a application, exporting traces to Amazon CloudWatch Omni
-# through the AWS Distro for OpenTelemetry instead of Langfuse. Runs beside the
-# Lab 5a service as mortgage-assistant-omni; Lab 5a is not required.
+# Lab 5b: supervisor-only memory, exporting traces to Amazon CloudWatch Omni
+# through the AWS Distro for OpenTelemetry. Runs beside the Lab 5a service as
+# mortgage-assistant-omni; Lab 5a is not required.
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
@@ -13,14 +13,6 @@ PROMPT="What is the balance on customer ID 123456's mortgage?"
 SESSION_TTL_SECONDS="604800"
 MODEL_ID="us.anthropic.claude-sonnet-4-6"
 MEMORY_EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
-FAULT_INJECTION_ENABLED="false"
-FAULT_INJECTION_TOOL="get_mortgage_details"
-FAULT_INJECTION_MODE="delay"
-FAULT_INJECTION_DELAY_SECONDS="5"
-APPROVAL_REQUIRED_TOOLS="create_loan_application"
-LEASE_SECONDS="180"
-ENABLE_REASONING="false"
-SNAPSHOT_HISTORY="true"
 IMAGE_URI_OVERRIDE=""
 CLUSTER_PARAMETER_NAME="/workshop/mortgage-assistant/eks/cluster-name"
 REPOSITORY_PARAMETER_NAME="/workshop/mortgage-assistant/ecr/repository-uri"
@@ -34,31 +26,17 @@ usage() {
   cat <<'EOT'
 Usage: 05-observability/05b-cloudwatch-omni/scripts/deploy-omni.sh [options]
 
-Deploys the Lab 5a mortgage assistant (agents-as-tools, audit trail, resumable
-execution, approvals) as mortgage-assistant-omni with its own Secret,
-exporting traces to Amazon CloudWatch Omni. It does not require Lab 5a and
-does not modify any Lab 5a resource.
+Deploys the supervisor-memory mortgage assistant as mortgage-assistant-omni
+with its own Service and Secret, exporting traces to Amazon CloudWatch Omni.
+It does not require Lab 5a and does not modify any Lab 5a resource.
 
 Options:
   --region REGION                    AWS Region (default: us-west-2).
   --profile PROFILE                  AWS CLI profile; omit to use the default profile.
   --service-access-cidr CIDR         CIDR allowed to invoke the API.
-  --prompt TEXT                      Prompt used for the deployment smoke test.
-  --session-ttl-seconds N            Short-term session retention (default: 604800).
-  --fault-injection-enabled          Enable the fault-injection exercise at deploy time.
-  --fault-injection-tool NAME        Tool name to target (default: get_mortgage_details).
-  --fault-injection-mode MODE        "delay", "error", "abort", or "crash" (default: delay).
-                                     "abort" fails the request so it can be resumed;
-                                     "crash" kills the pod process mid-turn.
-  --fault-injection-delay-seconds N  Delay applied in "delay" mode (default: 5).
-  --approval-required-tools LIST     Comma-separated tools that need human approval
-                                     (default: create_loan_application; empty disables).
-  --lease-seconds N                  Per-session lease; a crashed request can be retried
-                                     after it expires (default: 180).
-  --enable-reasoning                 Capture Bedrock extended-thinking in the audit trail.
-  --no-snapshot-history              Keep only the latest snapshot per agent.
-  --image-uri URI                    Deploy an image that is already in ECR and skip the
-                                     build and push (change settings in about 2 minutes).
+  --prompt TEXT                      Prompt used for the one deployment smoke test.
+  --session-ttl-seconds N            Latest supervisor snapshot TTL (default: 604800).
+  --image-uri URI                    Deploy an image already in ECR and skip build/push.
   -h, --help                         Show this help.
 EOT
 }
@@ -70,14 +48,6 @@ while [[ $# -gt 0 ]]; do
     --service-access-cidr) SERVICE_ACCESS_CIDR="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
     --session-ttl-seconds) SESSION_TTL_SECONDS="$2"; shift 2 ;;
-    --fault-injection-enabled) FAULT_INJECTION_ENABLED="true"; shift ;;
-    --fault-injection-tool) FAULT_INJECTION_TOOL="$2"; shift 2 ;;
-    --fault-injection-mode) FAULT_INJECTION_MODE="$2"; shift 2 ;;
-    --fault-injection-delay-seconds) FAULT_INJECTION_DELAY_SECONDS="$2"; shift 2 ;;
-    --approval-required-tools) APPROVAL_REQUIRED_TOOLS="$2"; shift 2 ;;
-    --lease-seconds) LEASE_SECONDS="$2"; shift 2 ;;
-    --enable-reasoning) ENABLE_REASONING="true"; shift ;;
-    --no-snapshot-history) SNAPSHOT_HISTORY="false"; shift ;;
     --image-uri) IMAGE_URI_OVERRIDE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -95,28 +65,6 @@ if [[ ! "$SESSION_TTL_SECONDS" =~ ^[0-9]+$ ]] || [[ "$SESSION_TTL_SECONDS" -lt 3
   echo "--session-ttl-seconds must be an integer of at least 3600." >&2
   exit 2
 fi
-if [[ "$FAULT_INJECTION_MODE" != "delay" && "$FAULT_INJECTION_MODE" != "error" \
-  && "$FAULT_INJECTION_MODE" != "abort" && "$FAULT_INJECTION_MODE" != "crash" ]]; then
-  echo "--fault-injection-mode must be 'delay', 'error', 'abort', or 'crash'." >&2
-  exit 2
-fi
-if [[ ! "$LEASE_SECONDS" =~ ^[0-9]+$ || "$LEASE_SECONDS" -lt 30 ]]; then
-  echo "--lease-seconds must be an integer of at least 30." >&2
-  exit 2
-fi
-if [[ ! "$FAULT_INJECTION_TOOL" =~ ^[A-Za-z0-9_]+$ ]]; then
-  echo "--fault-injection-tool must be a tool name (letters, digits, underscores)." >&2
-  exit 2
-fi
-if [[ ! "$APPROVAL_REQUIRED_TOOLS" =~ ^[A-Za-z0-9_,]*$ ]]; then
-  echo "--approval-required-tools must be a comma-separated list of tool names." >&2
-  exit 2
-fi
-if [[ ! "$FAULT_INJECTION_DELAY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "--fault-injection-delay-seconds must be a non-negative number." >&2
-  exit 2
-fi
-
 AWS_OPTIONS=(--region "$REGION")
 if [[ -n "$PROFILE" ]]; then
   AWS_OPTIONS+=(--profile "$PROFILE")
@@ -249,9 +197,7 @@ trap 'rm -f "$SERVICE_MANIFEST"' EXIT
 for template_variable in \
   IMAGE_URI REGION MODEL_ID KB_PARAMETER_NAME MEMORY_TABLE_NAME \
   MEMORY_VECTOR_INDEX_NAME MEMORY_EMBEDDING_MODEL_ID SESSION_TTL_SECONDS \
-  TRACE_LOG_GROUP FAULT_INJECTION_ENABLED FAULT_INJECTION_TOOL \
-  FAULT_INJECTION_MODE FAULT_INJECTION_DELAY_SECONDS SERVICE_ACCESS_CIDR \
-  APPROVAL_REQUIRED_TOOLS LEASE_SECONDS ENABLE_REASONING SNAPSHOT_HISTORY; do
+  TRACE_LOG_GROUP SERVICE_ACCESS_CIDR; do
   template_value="${!template_variable}"
   case "$template_value" in
     *'&'*|*'|'*|*'\'*|*$'\n'*|*$'\r'*)
@@ -272,14 +218,6 @@ sed \
   -e "s|__MEMORY_SESSION_TTL_SECONDS__|$SESSION_TTL_SECONDS|g" \
   -e "s|__SERVICE_ACCESS_CIDR__|$SERVICE_ACCESS_CIDR|g" \
   -e "s|__TRACE_LOG_GROUP__|$TRACE_LOG_GROUP|g" \
-  -e "s|__FAULT_INJECTION_ENABLED__|$FAULT_INJECTION_ENABLED|g" \
-  -e "s|__FAULT_INJECTION_TOOL__|$FAULT_INJECTION_TOOL|g" \
-  -e "s|__FAULT_INJECTION_MODE__|$FAULT_INJECTION_MODE|g" \
-  -e "s|__FAULT_INJECTION_DELAY_SECONDS__|$FAULT_INJECTION_DELAY_SECONDS|g" \
-  -e "s|__APPROVAL_REQUIRED_TOOLS__|$APPROVAL_REQUIRED_TOOLS|g" \
-  -e "s|__LEASE_SECONDS__|$LEASE_SECONDS|g" \
-  -e "s|__ENABLE_REASONING__|$ENABLE_REASONING|g" \
-  -e "s|__SNAPSHOT_HISTORY__|$SNAPSHOT_HISTORY|g" \
   "$MODULE_DIR/k8s/service.template.yaml" > "$SERVICE_MANIFEST"
 
 if grep -Eq '__[A-Z0-9_]+__' "$SERVICE_MANIFEST"; then
@@ -338,10 +276,9 @@ fi
 
 SMOKE_ACTOR="deployment-smoke-test"
 SMOKE_SESSION="session-$(date -u +%Y%m%d%H%M%S)"
-SMOKE_REQUEST="smoke-$(date -u +%Y%m%d%H%M%S)"
 PROMPT_JSON="$(python3 -c \
-  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3], "request_id": sys.argv[4]}))' \
-  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION" "$SMOKE_REQUEST")"
+  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3]}))' \
+  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION")"
 
 echo
 echo "Lab 5b smoke-test response:"
@@ -351,50 +288,26 @@ SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error --max-time 300 \
   --header "Content-Type: application/json" \
   --data "$PROMPT_JSON")"
 echo "$SMOKE_RESPONSE"
-
-SMOKE_TRACE_ID="$(python3 -c \
-  'import json, sys; print(json.loads(sys.argv[1]).get("trace_id") or "")' "$SMOKE_RESPONSE")"
-if [[ -z "$SMOKE_TRACE_ID" ]]; then
-  echo "The Lab 5b smoke response did not include a trace_id." >&2
-  echo "Check the pod logs for ADOT startup errors: the container must run under opentelemetry-instrument." >&2
-  exit 1
-fi
-
-echo
-echo "Verifying the audit trail and idempotent replay for request ${SMOKE_REQUEST}:"
-SMOKE_TRAIL="$(curl --fail-with-body --silent --show-error --max-time 60 \
-  --get "http://${SERVICE_ENDPOINT}/executions/${SMOKE_REQUEST}" \
-  --data-urlencode "actor_id=${SMOKE_ACTOR}" \
-  --data-urlencode "session_id=${SMOKE_SESSION}" \
-  --header "Authorization: Bearer ${API_KEY}")"
-SMOKE_REPLAY="$(curl --fail-with-body --silent --show-error --max-time 60 \
-  --request POST "http://${SERVICE_ENDPOINT}/invoke" \
-  --header "Authorization: Bearer ${API_KEY}" \
-  --header "Content-Type: application/json" \
-  --data "$PROMPT_JSON")"
-python3 - "$SMOKE_TRAIL" "$SMOKE_RESPONSE" "$SMOKE_REPLAY" <<'PYEOF'
+read -r SMOKE_REQUEST_ID SMOKE_TRACE_ID < <(python3 - "$SMOKE_RESPONSE" <<'PYEOF'
 import json
+import re
 import sys
 
-trail, first, replay = (json.loads(value) for value in sys.argv[1:4])
-problems = []
-if not trail.get("chain_valid"):
-    problems.append("audit hash chain is not valid")
-if trail["execution"]["status"] != "COMPLETED":
-    problems.append(f"execution status is {trail['execution']['status']}")
-if not trail.get("records"):
-    problems.append("audit trail is empty")
-if replay.get("response") != first.get("response"):
-    problems.append("replaying the request_id did not return the stored response")
-if replay.get("attempt") != first.get("attempt"):
-    problems.append("replaying the request_id started a new attempt")
-if problems:
-    sys.exit("Lab 5b smoke verification failed: " + "; ".join(problems))
-print(
-    f"  audit records: {len(trail['records'])}, chain valid, "
-    f"route: {[step['agent'] for step in trail['explanation']['route']] or 'none'}"
-)
+response = json.loads(sys.argv[1])
+required = ("request_id", "actor_id", "session_id", "response", "duration_ms", "trace_id")
+missing = [field for field in required if field not in response]
+if missing:
+    sys.exit("Lab 5b smoke response is missing: " + ", ".join(missing))
+if response["actor_id"] != "deployment-smoke-test":
+    sys.exit("Lab 5b smoke response returned the wrong actor_id")
+if not isinstance(response.get("duration_ms"), int):
+    sys.exit("Lab 5b smoke response duration_ms is not an integer")
+trace_id = response.get("trace_id")
+if not isinstance(trace_id, str) or not re.fullmatch(r"[0-9a-f]{32}", trace_id):
+    sys.exit("Lab 5b smoke response did not include a valid trace_id")
+print(response["request_id"], trace_id)
 PYEOF
+)
 
 OMNI_CONSOLE_URL="https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#settings:/omni"
 
@@ -409,7 +322,7 @@ Lab 5b completed.
   API endpoint: http://${SERVICE_ENDPOINT}
   Trace log group: $TRACE_LOG_GROUP
   Smoke-test trace ID: $SMOKE_TRACE_ID
-  Smoke-test request ID: $SMOKE_REQUEST (session $SMOKE_SESSION)
+  Smoke-test request ID: $SMOKE_REQUEST_ID (ephemeral correlation; session $SMOKE_SESSION)
 
 The mortgage-assistant-omni API key was not printed.
 
@@ -425,7 +338,6 @@ Next, send test requests and look up their traces in Omni (from 05-observability
   ./scripts/test-agent.sh --region $REGION
   uv run app/invoke_eks.py --region $REGION --prompt \\
     "What is the balance on customer ID 123456's mortgage?"
-  uv run app/invoke_eks.py --region $REGION --trail last
 
 To change settings without rebuilding, rerun with: --image-uri $IMAGE_URI
 EOT

@@ -11,13 +11,13 @@ usage() {
 Usage: 05-observability/05b-cloudwatch-omni/scripts/test-agent.sh [options]
 
 Sends a short series of prompts to the deployed mortgage assistant and prints
-the request ID, status, and trace ID of each request. Look the trace IDs up in CloudWatch Omni about
-five minutes later.
+the request and trace IDs of each response. Look the trace IDs up in CloudWatch
+Omni about five minutes later.
 
 Requests:
   1. A general mortgage question (Knowledge Base specialist).
   2. An existing-mortgage lookup (account tool).
-  3. A two-turn conversation in one session (session memory).
+  3. A two-turn conversation in one session (supervisor session memory).
 
 Options:
   --region REGION     AWS Region (default: us-west-2).
@@ -58,7 +58,7 @@ RESULTS=()
 
 # send LABEL SESSION_ID PROMPT
 send() {
-  local label="$1" session="$2" prompt="$3" output row trace_id request_id status
+  local label="$1" session="$2" prompt="$3" output row trace_id request_id
   echo
   echo "== $label"
   echo "   Prompt:  $prompt"
@@ -68,16 +68,14 @@ send() {
     echo "   kubectl logs -n mortgage-assistant deployment/mortgage-assistant-omni" >&2
     exit 1
   fi
-  # The client prints Actor/Session lines before the JSON body.
   row="$(python3 -c '
 import json, sys
-text = sys.stdin.read()
-body = json.loads(text[text.index("{"):])
+body = json.load(sys.stdin)
 print("Response: " + str(body.get("response", ""))[:300].replace("\n", " "), file=sys.stderr)
-print((body.get("trace_id") or "none") + "|" + (body.get("request_id") or "none") + "|" + (body.get("status") or "unknown"))
+print((body.get("trace_id") or "none") + "|" + (body.get("request_id") or "none"))
 ' <<<"$output")"
-  IFS='|' read -r trace_id request_id status <<<"$row"
-  RESULTS+=("$label|$session|$request_id|$status|$trace_id")
+  IFS='|' read -r trace_id request_id <<<"$row"
+  RESULTS+=("$label|$session|$request_id|$trace_id")
 }
 
 send "General question" "omni-test-$RUN_ID-general" \
@@ -91,10 +89,10 @@ send "Conversation, turn 2" "omni-test-$RUN_ID-memory" \
 
 echo
 echo "Trace IDs"
-printf '  %-26s %-40s %-38s %-10s %s\n' "Request" "Session" "Request ID" "Status" "Trace ID"
+printf '  %-26s %-40s %-38s %s\n' "Request" "Session" "Request ID" "Trace ID"
 for row in "${RESULTS[@]}"; do
-  IFS='|' read -r label session request_id status trace_id <<<"$row"
-  printf '  %-26s %-40s %-38s %-10s %s\n' "$label" "$session" "$request_id" "$status" "$trace_id"
+  IFS='|' read -r label session request_id trace_id <<<"$row"
+  printf '  %-26s %-40s %-38s %s\n' "$label" "$session" "$request_id" "$trace_id"
 done
 
 OMNI_DOMAIN_URL="$(aws ${PROFILE:+--profile "$PROFILE"} --region "$REGION" ssm get-parameter \
@@ -105,8 +103,6 @@ cat <<EOT
 
 Open CloudWatch Omni in about five minutes and search for these trace IDs:
   ${OMNI_DOMAIN_URL:-<see /workshop/mortgage-assistant/cloudwatch/omni-domain-url>}
-The two "Conversation" requests share one session ID.
-
-To see the audit trail that belongs to a trace, run (from 05-observability/05b-cloudwatch-omni):
-  uv run app/invoke_eks.py --region $REGION --session-id <session> --trail <request id>
+The two "Conversation" requests share one session ID and exercise the
+supervisor's latest-only snapshot.
 EOT

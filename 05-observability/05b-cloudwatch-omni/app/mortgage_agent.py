@@ -1,8 +1,9 @@
+"""Strands supervisor and traced specialist agents for Lab 5b."""
+
 import argparse
 import logging
 import os
 import re
-import time
 import uuid
 from datetime import date, timedelta
 from collections.abc import Callable, Iterable
@@ -13,26 +14,12 @@ import boto3
 from pydantic import BaseModel, Field
 from strands import Agent, tool
 from strands.agent import AgentResult
-from strands.hooks import AfterToolCallEvent, BeforeModelCallEvent, HookProvider, HookRegistry
-from strands.models import BedrockModel
 from strands_tools import calculator
 from strands_tools.retrieve import retrieve
 
 import telemetry
-from approvals import ApprovalHook
-from audit import AuditHook, current_trail, record_event
-from ledger import idempotent
-from memory import (
-    create_memory_manager,
-    create_session_manager,
-    validate_identifier,
-)
-from resilience import (
-    ResumeHook,
-    ToolResultCapHook,
-    reset_interrupt_state,
-    share_interrupts,
-)
+from memory import create_memory_manager, create_session_manager, validate_identifier
+from resilience import CurrentPromptHook, ToolResultCapHook
 
 
 telemetry.init_telemetry()
@@ -182,79 +169,6 @@ def retrieve_mortgage_knowledge(query: str) -> str:
     return _extract_retrieval_text(tool_result)
 
 
-def _fault_injection_enabled() -> bool:
-    return os.environ.get("FAULT_INJECTION_ENABLED", "false").strip().lower() == "true"
-
-
-class RequestAborted(Exception):
-    """A specialist failed or an abort fault fired; the request is FAILED and resumable."""
-
-
-def maybe_inject_fault(tool_name: str) -> None:
-    """Optionally delay, fail, abort, or crash a tool call for the exercises.
-
-    ``error`` is an ordinary tool error: the model sees it and may work around it.
-    ``abort`` fails the whole request (Strands turns tool exceptions into tool errors,
-    so ``FailFastHook`` raises before the supervisor's next model call). ``crash`` kills the process.
-    """
-    if not _fault_injection_enabled():
-        return
-    target_tool = os.environ.get("FAULT_INJECTION_TOOL", "get_mortgage_details").strip()
-    if target_tool != tool_name:
-        return
-
-    mode = os.environ.get("FAULT_INJECTION_MODE", "delay").strip().lower()
-    telemetry.record_fault_injection(tool_name, mode)
-    record_event("fault_injection", "tool", {"tool": tool_name, "mode": mode})
-    if mode == "error":
-        raise RuntimeError(f"Fault injection: simulated failure in tool '{tool_name}'.")
-    if mode == "abort":
-        trail = current_trail()
-        if trail is None:
-            raise RequestAborted(f"Fault injection: aborted request in tool '{tool_name}'.")
-        trail.abort_reason = f"Fault injection: aborted request in tool '{tool_name}'."
-        raise RuntimeError(trail.abort_reason)
-    if mode == "crash":
-        os._exit(1)  # simulates a pod/process kill mid-turn
-
-    delay_seconds = float(os.environ.get("FAULT_INJECTION_DELAY_SECONDS", "5"))
-    time.sleep(delay_seconds)
-
-
-class FailFastHook(HookProvider):
-    """End the request when a specialist fails instead of letting the model paper over it.
-
-    ``Agent.as_tool`` turns a specialist's exception into an error tool result, so a
-    Bedrock outage inside a specialist would otherwise produce a "successful" apology.
-    This hook (supervisor only) flags such results and the ``abort`` fault, then raises
-    before the supervisor's next model call. The request becomes FAILED and a retry
-    with the same request_id resumes it. Exceptions inside tool callbacks are swallowed
-    by the SDK, hence the deferred raise.
-    """
-
-    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
-        registry.add_callback(AfterToolCallEvent, self._after_tool_call)
-        registry.add_callback(BeforeModelCallEvent, self._before_model_call)
-
-    def _after_tool_call(self, event: AfterToolCallEvent) -> None:
-        trail = current_trail()
-        if trail is None or getattr(event.selected_tool, "tool_type", None) != "agent":
-            return
-        if event.result.get("status") == "error" and not event.cancel_message:
-            text = " ".join(
-                block.get("text", "") for block in event.result.get("content", []) if isinstance(block, dict)
-            )
-            if "already processing" in text:
-                return  # two parallel calls to one specialist: the model can retry
-            trail.abort_reason = trail.abort_reason or f"{event.tool_use['name']} failed: {text}"
-
-    def _before_model_call(self, event: BeforeModelCallEvent) -> None:
-        trail = current_trail()
-        if trail is not None and trail.abort_reason:
-            reason, trail.abort_reason = trail.abort_reason, None
-            raise RequestAborted(reason)
-
-
 class SpecialistReport(BaseModel):
     """Structured result every specialist returns to the supervisor."""
 
@@ -321,7 +235,6 @@ To create an application, use a supplied customer ID or call create_customer_id
 when one is needed. Collect any missing name, age, annual income, and annual
 expenses one question at a time. Call create_loan_application only after every
 required field is available and the user has asked to create the application.
-That side effect requires approval.
 
 Never say that a customer ID or application was created before the corresponding
 tool executes successfully. Never claim that an application was approved,
@@ -336,7 +249,6 @@ advice, and do not expose customer information beyond the current task.
 def get_mortgage_details(customer_id: str) -> dict[str, Any]:
     """Return mortgage details for the specified customer."""
     normalized_customer_id = _validate_customer_id(customer_id)
-    maybe_inject_fault("get_mortgage_details")
     today = date.today()
     return {
         "customer_id": normalized_customer_id,
@@ -380,14 +292,12 @@ def get_application_details(customer_id: str) -> dict[str, str]:
 
 
 @tool
-@idempotent
 def create_customer_id() -> str:
-    """Create a customer ID for a new application."""
+    """Create a synthetic customer identifier for a new application."""
     return f"CUST-{uuid.uuid4().hex[:8].upper()}"
 
 
 @tool
-@idempotent
 def create_loan_application(
     customer_id: str,
     name: str,
@@ -395,7 +305,7 @@ def create_loan_application(
     annual_income: int,
     annual_expenses: int,
 ) -> str:
-    """Create a loan application after approval."""
+    """Create a synthetic mortgage application after validating its inputs."""
     normalized_customer_id = _validate_customer_id(customer_id)
     normalized_name = name.strip()
     if not normalized_name or len(normalized_name) > 100:
@@ -436,7 +346,7 @@ SPECIALISTS: dict[str, dict[str, Any]] = {
         "agent_id": "new_application",
         "description": (
             "Handles mortgage application status, document checks, and "
-            "approved application creation."
+            "application creation."
         ),
         "prompt": NEW_APPLICATION_PROMPT,
         "tools": [
@@ -450,59 +360,22 @@ SPECIALISTS: dict[str, dict[str, Any]] = {
 SPECIALIST_TOOL_NAMES = frozenset(SPECIALISTS)
 
 
-def _reasoning_enabled() -> bool:
-    return os.environ.get("ENABLE_REASONING", "false").strip().lower() == "true"
-
-
-def _supervisor_model() -> BedrockModel | str:
-    if not _reasoning_enabled():
-        return MODEL_ID
-    return BedrockModel(
-        model_id=MODEL_ID,
-        additional_request_fields={"thinking": {"type": "enabled", "budget_tokens": 2048}},
-    )
-
-
-def _hooks(agent_id: str, system_prompt: str, *, fail_fast: bool = False) -> list[Any]:
-    # Order matters: resume first, then approval, then audit. Strands still runs the audit
-    # callback after an approval interrupt, so a paused call has a tool_start but no tool_call.
-    hooks: list[Any] = [
-        ResumeHook(agent_id, system_prompt),
-        ApprovalHook(agent_id),
-        AuditHook(agent_id),
-        ToolResultCapHook(),
-    ]
-    if fail_fast:
-        hooks.append(FailFastHook())
-    return hooks
-
-
-def create_specialist_tool(
-    name: str,
-    actor_id: str,
-    session_id: str,
-    *,
-    model: Any = None,
-    session_factory: Callable[[], Any] | None = None,
-) -> Any:
-    """Build one specialist as an agent-as-tool with its own persistent session."""
+def create_specialist_tool(name: str, *, model: Any = None) -> Any:
+    """Build a stateless traced specialist and expose it through ``Agent.as_tool``."""
     spec = SPECIALISTS[name]
     if name == "mortgage_education_specialist" and model is None:
         get_knowledge_base_id()
     agent = Agent(
-        model=model or MODEL_ID,
+        model=model if model is not None else MODEL_ID,
         name=name,
         description=spec["description"],
         agent_id=spec["agent_id"],
         system_prompt=spec["prompt"],
         tools=spec["tools"],
         structured_output_model=SpecialistReport,
-        session_manager=(session_factory or (lambda: create_session_manager(actor_id, session_id)))(),
-        hooks=_hooks(spec["agent_id"], spec["prompt"]),
         callback_handler=None,
         trace_attributes=telemetry.current_trace_attributes(),
     )
-    # preserve_context keeps the specialist's conversation (and interrupts) in its session.
     return agent.as_tool(name=name, description=spec["description"], preserve_context=True)
 
 
@@ -517,74 +390,51 @@ def create_supervisor_agent(
     use_memory: bool = True,
     specialists: Iterable[str] | None = None,
 ) -> Agent:
-    """Build the supervisor and its agents-as-tools.
-
-    The keyword arguments let tests inject scripted models and local storage; the
-    service always uses the defaults.
-    """
-    attributes = telemetry.trace_attributes(actor_id, session_id, request_id)
-    specialist_tools = [
-        create_specialist_tool(
-            name,
-            actor_id,
-            session_id,
-            model=specialist_model,
-            session_factory=session_factory,
+    """Build one traced supervisor with persistent memory and stateless specialists."""
+    attributes = telemetry.current_trace_attributes() or telemetry.trace_attributes(
+        actor_id, session_id, request_id
+    )
+    with telemetry.use_trace_attributes(attributes):
+        specialist_tools = [
+            create_specialist_tool(name, model=specialist_model)
+            for name in (specialists or SPECIALISTS)
+        ]
+        session_manager = (
+            session_factory()
+            if session_factory is not None
+            else create_session_manager(actor_id, session_id)
         )
-        for name in (specialists or SPECIALISTS)
-    ]
-    supervisor = Agent(
-        model=supervisor_model or _supervisor_model(),
-        agent_id="supervisor",
-        name="mortgage_supervisor",
-        session_manager=(session_factory or (lambda: create_session_manager(actor_id, session_id)))(),
-        memory_manager=create_memory_manager(actor_id) if use_memory else None,
-        tools=[*specialist_tools, calculator],
-        hooks=_hooks("supervisor", SUPERVISOR_PROMPT, fail_fast=True),
-        callback_handler=None,
-        trace_attributes=attributes,
-        system_prompt=SUPERVISOR_PROMPT,
-    )
-    share_interrupts(supervisor, specialist_tools)
-    return supervisor
-
-
-def reset_pending_interrupts(actor_id: str, session_id: str) -> None:
-    """Clear paused approvals on the supervisor and every specialist of a session."""
-    validated_actor_id = validate_identifier(actor_id, "actor_id")
-    validated_session_id = validate_identifier(session_id, "session_id")
-    supervisor = create_supervisor_agent(
-        actor_id=validated_actor_id,
-        session_id=validated_session_id,
-        request_id="maintenance",
-    )
-    agents = [supervisor]
-    for registered in supervisor.tool_registry.registry.values():
-        sub_agent = getattr(registered, "agent", None)
-        if sub_agent is not None:
-            agents.append(sub_agent)
-    reset_interrupt_state(agents)
+        return Agent(
+            model=supervisor_model if supervisor_model is not None else MODEL_ID,
+            agent_id="supervisor",
+            name="mortgage_supervisor",
+            session_manager=session_manager,
+            memory_manager=create_memory_manager(actor_id) if use_memory else None,
+            tools=[*specialist_tools, calculator],
+            hooks=[CurrentPromptHook(SUPERVISOR_PROMPT), ToolResultCapHook()],
+            callback_handler=None,
+            trace_attributes=attributes,
+            system_prompt=SUPERVISOR_PROMPT,
+        )
 
 
 def run_supervisor(
-    agent_input: Any,
+    agent_input: str,
     actor_id: str,
     session_id: str,
     request_id: str,
 ) -> AgentResult:
-    """Invoke the supervisor with a prompt, or with interrupt responses to resume it."""
+    """Invoke a fresh supervisor with ephemeral request correlation metadata."""
     validated_actor_id = validate_identifier(actor_id, "actor_id")
     validated_session_id = validate_identifier(session_id, "session_id")
     attributes = telemetry.trace_attributes(
-        validated_actor_id,
-        validated_session_id,
-        request_id,
+        validated_actor_id, validated_session_id, request_id
     )
     with telemetry.use_trace_attributes(attributes):
         supervisor = create_supervisor_agent(
-            actor_id=validated_actor_id,
-            session_id=validated_session_id,
-            request_id=request_id,
+            validated_actor_id,
+            validated_session_id,
+            request_id,
         )
         return supervisor(
             agent_input,
@@ -596,29 +446,26 @@ def run_supervisor(
         )
 
 
-def run_prompt(prompt: str, actor_id: str, session_id: str, request_id: str) -> str:
-    """Invoke the supervisor once (no lease or ledger); used by the local CLI."""
+def run_prompt(prompt: str, actor_id: str, session_id: str) -> str:
+    """Validate and run one local prompt against the complete Lab 5b agent."""
     if not prompt or not prompt.strip():
         raise ValueError("Prompt must not be empty")
-    return str(run_supervisor(prompt.strip(), actor_id, session_id, request_id))
+    return str(
+        run_supervisor(
+            prompt.strip(), actor_id, session_id, request_id=str(uuid.uuid4())
+        )
+    )
 
 
 def main() -> int:
-    """Run one local prompt against the complete Lab 5 agent."""
+    """Run one local prompt against the complete Lab 5b agent."""
     parser = argparse.ArgumentParser(description="Mortgage Assistant Agent")
     parser.add_argument("--prompt", "-p", required=True)
     parser.add_argument("--actor-id", default="local-user")
     parser.add_argument("--session-id", default="local-session")
     args = parser.parse_args()
     configure_logging()
-    print(
-        run_prompt(
-            args.prompt,
-            args.actor_id,
-            args.session_id,
-            request_id=str(uuid.uuid4()),
-        )
-    )
+    print(run_prompt(args.prompt, args.actor_id, args.session_id))
     return 0
 
 
