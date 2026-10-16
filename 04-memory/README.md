@@ -1,198 +1,56 @@
-# Lab 04: Short-term and long-term memory on Amazon EKS
+# Lab 04: Memory on Amazon EKS operator reference
 
-Lab 4 adds exactly two user-facing memory mechanisms to the mortgage assistant:
+This README is an operator reference for the Lab 4 checkpoint. For the guided deployment and the two required behavioral proofs, see the [Workshop Lab 4 page](../../build-and-deploy-agents-to-amazon-eks-with-amazon-bedrock/content/lab4-memory/).
 
-1. **Short-term session memory** through one latest-only DynamoDB-backed
-   `SnapshotSessionManager` attached to `mortgage_supervisor` with stable
-   `agent_id="supervisor"`.
-2. **Long-term semantic memory** through one actor-scoped `MemoryManager` and
-   `DynamoDBMemoryStore`, also attached only to the supervisor.
+Use only synthetic workshop data. This checkpoint is not a production mortgage, lending, identity, credit, or compliance system.
 
-The three specialists remain real Strands `Agent` objects exposed with
-`Agent.as_tool`. They keep their existing names, stable IDs, prompts, tools, and
-`SpecialistReport` structured output, but have no session manager or memory
-manager. Every HTTP request creates a fresh supervisor and fresh specialists;
-the supervisor restores its current session from DynamoDB.
+## Architecture
 
-This is a self-contained checkpoint. It does not import application code from
-another lab and does not use Amazon Bedrock AgentCore.
+Each authenticated `POST /invoke` creates a fresh `mortgage_supervisor` and fresh specialists. The supervisor has stable `agent_id="supervisor"` and is the only agent with persistence:
 
-## Learning objectives
+- a latest-only, message-level session snapshot scoped to actor and session, with `MEMORY_SESSION_TTL_SECONDS` set to seven days by default;
+- actor-scoped durable semantic memory for selected mortgage goals and preferences, with no TTL.
 
-After this lab, you can:
+The three specialists are `Agent.as_tool` instances with their existing prompts, tools, stable IDs, and structured reports. They have no session or memory managers. Neither EKS replica owns conversation state.
 
-- distinguish a session transcript from durable semantic memory;
-- restore a conversation on either of two EKS replicas;
-- store and semantically search durable mortgage preferences by actor;
-- explain why only the supervisor owns persistence in an agents-as-tools design;
-- inspect the physical DynamoDB keys used by both memory mechanisms.
+A single DynamoDB table is partitioned by actor. The session snapshot is replaced as conversation advances; durable memory is separate from the transcript. The prompt-refresh hook reapplies the currently deployed supervisor prompt after snapshot restoration, and the result-cap hook bounds tool text retained in the snapshot.
 
-Use only synthetic workshop data. This is not a production mortgage, lending,
-identity, credit, or compliance system.
+Workshop Studio owns the shared EKS cluster, ECR repository, Knowledge Base, DynamoDB memory table, vector index, and Pod Identity permissions. This module updates only `mortgage-assistant`.
 
-## Prerequisites
+## Local validation
 
-Complete Labs 0 through 3 in a Workshop Studio environment. The shared EKS
-cluster, ECR repository, Knowledge Base, DynamoDB memory table, vector index,
-and Pod Identity permissions must already exist.
-
-Commands below run from `agent-eks/04-memory`. Local tests do not call AWS,
-EKS, Bedrock, a model, or a deployed service.
+Run from `agent-eks/04-memory`:
 
 ```bash
 uv run python -m unittest discover --start-directory tests --verbose
 ```
 
-Workshop Studio publishes the shared resources through these Parameter Store
-paths:
-
-| Resource | Parameter Store path |
-| --- | --- |
-| EKS cluster | `/workshop/mortgage-assistant/eks/cluster-name` |
-| ECR repository | `/workshop/mortgage-assistant/ecr/repository-uri` |
-| Knowledge Base | `/workshop/mortgage-assistant/bedrock/knowledge-base-id` |
-| Memory table | `/workshop/mortgage-assistant/memory/table-name` |
-| Vector index | `/workshop/mortgage-assistant/memory/vector-index-name` |
-
-## Architecture
-
-```text
-client
-  -> source-CIDR-restricted Network Load Balancer
-  -> Kubernetes Service
-  -> one of two non-root FastAPI pods
-       -> bearer authentication and bounded input validation
-       -> mortgage_supervisor (agent_id="supervisor")
-            -> latest-only SnapshotSessionManager
-            -> actor-scoped MemoryManager
-            -> calculator
-            -> mortgage_education_specialist as Agent tool
-            -> existing_mortgage_specialist as Agent tool
-            -> mortgage_application_specialist as Agent tool
-```
-
-The education specialist uses the existing bounded Knowledge Base wrapper. The
-other specialists use synthetic, validated workshop tools. Specialists return a
-structured report to the supervisor and do not persist their own conversations.
-The supervisor session contains the user-facing conversation and delegation
-results, which is sufficient for follow-up requests.
-
-The prompt-refresh hook is intentionally retained on the supervisor. The
-installed Strands `SnapshotSessionManager` restores the system prompt captured
-in the latest snapshot, so the hook reapplies the currently deployed supervisor
-prompt before an invocation. This lets existing sessions receive prompt updates
-after a rollout. A separate result-cap hook bounds text added to the supervisor
-snapshot by a tool response.
-
-## DynamoDB data model
-
-All data is partitioned by the validated actor:
-
-```text
-pk=user/<actor_id>
-```
-
-### Short-term memory
-
-The one physical snapshot key is generated by Strands:
-
-```text
-sk=session/<session_id>/scopes/agent/supervisor/snapshots/snapshot_latest.json
-```
-
-It is overwritten after messages and after invocation management. It uses
-`MEMORY_SESSION_TTL_SECONDS`, seven days by default. No immutable snapshot
-history is created, and no specialist snapshot keys are expected.
-
-### Long-term memory
-
-Durable facts use UUID keys:
-
-```text
-sk=memories/<uuid>
-```
-
-They are embedded with `amazon.titan-embed-text-v2:0` using 1,024 normalized
-dimensions and searched through the configured DynamoDB vector index. Every
-search explicitly sets `pk=user/<actor_id>`, preventing cross-actor vector
-results. Long-term memories have no TTL.
-
-Existing audit, execution, lock, ledger, immutable-history, or other old records
-from earlier Lab 4 revisions are ignored. This implementation does not read,
-replay, migrate, or delete them.
-
-## Memory policy
-
-The supervisor may save only durable mortgage goals and preferences, such as a
-preferred term, rate structure, approximate property-price range, deposit goal,
-payment priority, refinancing objective, or application timeline. It must not
-store customer IDs, account numbers, authentication data, exact income,
-documents, credit information, or other sensitive identifiers as long-term
-memory. This is a prompt policy rather than a complete security boundary.
+These tests use scripted models and test stores. They do not call AWS, Bedrock, EKS, or a deployed service.
 
 ## Deploy
 
-The deployment script discovers the shared resources, verifies memory
-readiness, builds and pushes a `linux/amd64` image unless `--image-uri` is
-provided, reuses or creates the Kubernetes API-key Secret, renders the manifest,
-waits for the two-replica rollout and NLB, checks readiness, and sends one
-authenticated smoke request.
-
-Deployment modifies charge-incurring resources. Confirm the account, Region,
-credentials, and intended workshop environment before running it.
+Deployment changes charge-incurring participant resources. Confirm the account, Region, credentials, and intended workshop environment before running it.
 
 ```bash
 ./scripts/deploy-memory.sh --region us-west-2
 ```
 
-Available options:
+The script reads canonical Parameter Store values, validates the shared memory table and vector index, builds and pushes a `linux/amd64` image unless an image is supplied, renders and applies participant manifests, waits for two ready replicas and the NLB, then sends an authenticated smoke invocation. It does not create or replace shared infrastructure.
 
 | Option | Purpose |
 | --- | --- |
 | `--region REGION` | Select the AWS Region. |
 | `--profile PROFILE` | Use a named local AWS profile. |
-| `--service-access-cidr CIDR` | Restrict NLB access; defaults to the caller's public IPv4 `/32`. |
-| `--session-ttl-seconds N` | Set short-term retention; minimum 3600 seconds. |
-| `--prompt TEXT` | Set the one smoke-test prompt. |
-| `--image-uri URI` | Reuse an existing image and skip build and push. |
+| `--service-access-cidr CIDR` | Restrict NLB access. The default is the caller's public IPv4 `/32`. |
+| `--session-ttl-seconds N` | Set session retention. The minimum is 3600 seconds. |
+| `--prompt TEXT` | Set the smoke-test prompt. |
+| `--image-uri URI` | Reuse an existing image and skip the image build and push. |
 
-The manifest preserves two replicas, rolling updates, probes, resource bounds,
-PodDisruptionBudget, Pod Identity service account, disabled service-account
-token mounting, non-root execution, read-only root filesystem, dropped Linux
-capabilities, RuntimeDefault seccomp, bounded temporary storage, bearer
-authentication, and a source-restricted NLB.
+The deployed workload preserves two replicas, rolling updates, probes, a PodDisruptionBudget, resource bounds, Pod Identity, disabled service-account token mounting, non-root execution, a read-only root filesystem, dropped capabilities, RuntimeDefault seccomp, bearer authentication, and source-restricted NLB access.
 
-## Invoke the service
+## Service and client contract
 
-The client discovers the Service endpoint and API-key Secret unless `--url` and
-`--api-key` are supplied. It derives the default actor from the AWS account and
-stores only the current session per actor in `.workshop/client-state.json`.
-
-```bash
-uv run app/invoke_eks.py --region us-west-2 --show-context
-uv run app/invoke_eks.py --region us-west-2 \
-  --prompt "I am considering a property worth 600,000 dollars."
-uv run app/invoke_eks.py --region us-west-2 \
-  --prompt "What property value did I mention?"
-```
-
-Use a new session to distinguish long-term memory from the current transcript:
-
-```bash
-uv run app/invoke_eks.py --region us-west-2 \
-  --prompt "Remember that I prefer a 15-year fixed-rate mortgage."
-uv run app/invoke_eks.py --region us-west-2 --new-session \
-  --prompt "What mortgage term do I prefer?"
-```
-
-Client options include `--actor-id`, `--session-id`, `--new-session`,
-`--show-context`, `--url`, `--api-key`, `--profile`, `--region`, `--namespace`,
-`--service`, `--secret`, `--timeout`, `--json`, and `--state-file`.
-
-## API
-
-`GET /health` and `GET /health/ready` are unauthenticated Kubernetes probe
-endpoints. `POST /invoke` requires `Authorization: Bearer <key>` and accepts only:
+`GET /health` and `GET /health/ready` are unauthenticated probe endpoints. `POST /invoke` requires `Authorization: Bearer <key>` and accepts only:
 
 ```json
 {
@@ -202,27 +60,19 @@ endpoints. `POST /invoke` requires `Authorization: Bearer <key>` and accepts onl
 }
 ```
 
-`prompt` is 1 to 4,000 characters. Actor and session IDs are 1 to 128 characters
-and may contain letters, numbers, `.`, `_`, `:`, or `-`. The response contains:
+`prompt` is 1 to 4,000 characters. Actor and session IDs are 1 to 128 characters and can contain letters, numbers, `.`, `_`, `:`, or `-`. A successful response contains a generated `request_id`, actor ID, session ID, response, and duration. The request ID is ephemeral correlation, not an idempotency key.
 
-```json
-{
-  "request_id": "generated-correlation-id",
-  "actor_id": "participant-123456789012",
-  "session_id": "session-example",
-  "response": "...",
-  "duration_ms": 1234
-}
+`app/invoke_eks.py` discovers the Service endpoint and API-key Secret unless `--url` and `--api-key` are supplied. It derives the default actor from the caller's AWS account and stores only the current session selection per actor in `.workshop/client-state.json`.
+
+```bash
+uv run app/invoke_eks.py --region us-west-2 --show-context
+uv run app/invoke_eks.py --region us-west-2 \
+  --prompt "I am considering a property worth 600,000 dollars."
 ```
 
-The generated request ID is ephemeral correlation only. It is not an
-idempotency key and cannot be used to replay, resume, approve, deny, cancel, or
-inspect a request.
+## Facilitator utilities
 
-## Inspect memory
-
-The inspector separates session snapshot keys from durable memories and can run
-an actor-scoped semantic search:
+`app/inspect_memory.py` lists session snapshots or durable memories for an actor and can run an actor-scoped semantic search. It is a facilitator diagnostic utility, not part of the guided participant proof.
 
 ```bash
 uv run app/inspect_memory.py --region us-west-2 --sessions
@@ -231,65 +81,25 @@ uv run app/inspect_memory.py --region us-west-2 \
   --search "preferred repayment period"
 ```
 
-For short-term memory, expect only paths containing
-`scopes/agent/supervisor/snapshots/snapshot_latest.json`. Old records from an
-expanded Lab 4 deployment may still appear in DynamoDB but are not used.
+`scripts/hydrate_memory.py` seeds or clears synthetic durable preference records. `seed --replace` removes only `memories/` for the selected actor before writing the fixed synthetic examples. `clear --all-data` also removes that actor's session records and is intended only for explicit facilitator cleanup.
 
-`hydrate_memory.py` can seed synthetic durable memories for an actor. Its clear
-commands are explicit test-data utilities; normal deployment, invocation, and
-application cleanup do not delete DynamoDB records.
+```bash
+uv run scripts/hydrate_memory.py seed --region us-west-2 \
+  --actor-id participant-123 --replace
+```
 
-## Configuration
+Vector index updates are eventually consistent. The hydration and inspection utilities can wait up to 60 seconds for a search result.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MODEL_ID` | `us.anthropic.claude-sonnet-4-6` | Supervisor and specialist model. |
-| `KB_PARAMETER_NAME` | required | Knowledge Base Parameter Store path. |
-| `MEMORY_TABLE_NAME` | required | Shared DynamoDB table. |
-| `MEMORY_VECTOR_INDEX_NAME` | `vector_index` | DynamoDB vector index. |
-| `MEMORY_EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Embedding model. |
-| `MEMORY_SESSION_TTL_SECONDS` | `604800` | Latest supervisor snapshot TTL. |
-| `MEMORY_MAX_SEARCH_RESULTS` | `5` | Actor-scoped semantic search limit. |
-| `MAX_TOOL_RESULT_CHARS` | `16000` | Maximum retained tool-result text block. |
-| `MORTGAGE_API_KEY` | required | Bearer credential from the Kubernetes Secret. |
-| `AGENT_CONCURRENCY` | `4` | Concurrent agent turns per pod. |
+## Security, ownership, and trade-offs
 
-## Limitations and trade-offs
+- Actor IDs are caller supplied and are not authorization. The shared bearer key also does not prove actor identity. A production system should derive identity from a verified token and authorize it.
+- Send one request at a time for an actor and session. There is no cross-pod lease; concurrent same-session writes are last-writer-wins. A failed connection has an unknown outcome, and a retry is a new invocation.
+- Durable-memory restrictions are prompt policy. Add deterministic validation, redaction, authorization, and retention controls before using non-synthetic data.
+- The source-restricted NLB uses plaintext HTTP. Production systems should use TLS and an appropriate authenticated private or edge endpoint.
+- Older operational records from earlier Lab 4 revisions are ignored. This checkpoint does not read, migrate, replay, or delete them.
 
-- Send only one request at a time for a given actor/session. There is no
-  cross-pod session lease. Concurrent requests for the same session can restore
-  the same snapshot and then overwrite each other; the last writer wins.
-- A process or pod failure can leave a partially advanced external action or an
-  uncertain client result. There is no execution record, heartbeat, replay,
-  resume, approval interrupt, tool ledger, or crash rollback. Retry semantics
-  are therefore weaker and a retry is a new invocation.
-- The shared bearer key does not prove the actor identity because `actor_id` is
-  caller supplied. Production systems should derive actor identity from a
-  verified identity token and apply authorization.
-- The source-restricted NLB uses plaintext HTTP. Production systems should use
-  TLS and an appropriate authenticated private or edge endpoint.
-- The model decides when to save memory, and the sensitive-data restriction is
-  prompt based. Add deterministic validation, redaction, authorization, and
-  retention controls before using non-synthetic data.
-- Vector index updates are eventually consistent. A newly stored memory may not
-  appear immediately in semantic search.
+Never add static AWS credentials to pods or create replacement shared resources.
 
 ## Cleanup boundary
 
-`scripts/cleanup-memory.sh` removes only the `mortgage-assistant` Kubernetes
-namespace and load balancer. It does not remove the shared DynamoDB table,
-Knowledge Base, EKS cluster, ECR repository, Pod Identity resources, snapshots,
-memories, or old operational records. Workshop Studio remains the owner of
-shared infrastructure.
-
-## Completion checkpoint
-
-Lab 4 is complete when:
-
-- repeated calls with the same actor/session recall the supervisor transcript;
-- only the supervisor latest snapshot is created and it has a TTL;
-- a new session for the same actor can retrieve a stored durable preference;
-- another actor cannot retrieve that preference;
-- the authenticated API returns the generated request ID, actor, session,
-  response, and duration;
-- both replicas remain healthy with the documented Kubernetes safeguards.
+`scripts/cleanup-memory.sh` removes only the `mortgage-assistant` Kubernetes namespace and load balancer. It does not remove the shared DynamoDB table, Knowledge Base, EKS cluster, ECR repository, Pod Identity resources, snapshots, or durable memories. Workshop Studio remains the owner of shared infrastructure.
