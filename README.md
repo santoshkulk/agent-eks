@@ -15,6 +15,7 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB, turn the specialists into persistent agents-as-tools, and add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
 | 5a | `05-observability/05a-langfuse` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
 | 5b | `05-observability/05b-cloudwatch-omni` | Optional: send the same traces to Amazon CloudWatch Omni, alongside or instead of Langfuse. |
+| 5CC | `05-observability/05cc-langfuse-cost-attribution` | Pilot: deploy Agent-attributed Langfuse telemetry and build session and application token/cost reports. |
 | 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
@@ -142,6 +143,16 @@ uv run python -m unittest discover --start-directory tests --verbose
 ```
 
 See [`05-observability/05b-cloudwatch-omni/README.md`](05-observability/05b-cloudwatch-omni/README.md).
+
+## Lab 5CC: Pilot Agent token and estimated-cost attribution
+
+```bash
+cd /workshop/05-observability/05cc-langfuse-cost-attribution
+uv run python -m unittest discover --start-directory tests --verbose
+./scripts/deploy-cost-attribution.sh --region us-west-2
+```
+
+See [`05-observability/05cc-langfuse-cost-attribution/README.md`](05-observability/05cc-langfuse-cost-attribution/README.md) for the isolated metadata deployment, per-generation inspection, session report, monthly application rollup, and restoration steps. This pilot does not modify the 5A or 5B source checkpoints.
 
 ## Lab 6: Integrate MCP Tools with the Strands Agent
 
