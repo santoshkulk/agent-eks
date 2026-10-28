@@ -106,6 +106,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
             "/workshop/mortgage-assistant/memory/table-name",
             "/workshop/mortgage-assistant/memory/vector-index-name",
             "/workshop/mortgage-assistant/bedrock/knowledge-base-id",
+            "/workshop/mortgage-assistant/langfuse/otlp-endpoint",
             "/workshop/mortgage-assistant/langfuse/url",
         ):
             self.assertIn(parameter_path, deploy)
@@ -113,7 +114,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
         self.assertIn('uv run --project "$MODULE_DIR" --frozen', deploy)
         self.assertIn("SMOKE_TRACE_ID", deploy)
 
-    def test_deploy_preserves_shared_access_and_secret_state(self) -> None:
+    def test_deploy_supports_fresh_creation_and_safe_overlay(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-cost-attribution.sh").read_text()
         for expected in (
             "SERVICE_ACCESS_RANGES=",
@@ -124,10 +125,11 @@ class ResourceDiscoveryTests(unittest.TestCase):
             '"$REPOSITORY_URI":lab05-agent-*|"$REPOSITORY_URI":lab05cc-agent-*',
             "serviceaccount/mortgage-assistant",
             "poddisruptionbudget/mortgage-assistant",
-            "0.0.0.0/0",
-            "::/0",
-            'secret/$API_SECRET',
-            'secret/$LANGFUSE_SECRET',
+            "ipaddress.ip_network",
+            "LANGFUSE_INIT_PROJECT_PUBLIC_KEY",
+            "LANGFUSE_INIT_PROJECT_SECRET_KEY",
+            "--from-file=api-key=/dev/stdin",
+            "--from-file=otlp-headers=/dev/stdin",
         ):
             self.assertIn(expected, deploy)
         for forbidden in (
@@ -137,7 +139,6 @@ class ResourceDiscoveryTests(unittest.TestCase):
             "--from-literal",
             "MORTGAGE_API_KEY:-",
             "LANGFUSE_SECRET_ARN",
-            "SERVICE_ACCESS_CIDR",
         ):
             self.assertNotIn(forbidden, deploy)
 

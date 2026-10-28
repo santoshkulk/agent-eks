@@ -1,11 +1,12 @@
 # Lab 5CC: Pilot per-Agent token and estimated-cost attribution
 
 This isolated pilot copies the Lab 5A Langfuse checkpoint and adds only
-filterable application, release, environment, and Agent metadata. It reuses the
-existing `mortgage-assistant` Service, Network Load Balancer, API-key Secret,
-DynamoDB memory, Pod Identity association, and self-hosted Langfuse project.
-Deploying it replaces the current `mortgage-assistant` pods with the 5CC image;
-it does not modify the 5A or 5B source directories.
+filterable application, release, environment, and Agent metadata. It can run
+independently when the `mortgage-assistant` namespace is absent, or overlay a
+complete Lab 5A or prior 5CC workload by changing only its image. Both modes
+reuse the Workshop Studio EKS cluster, ECR repository, DynamoDB memory,
+Knowledge Base, Pod Identity association, and self-hosted Langfuse project. The
+pilot does not modify the 5A or 5B source directories.
 
 Use only workshop data. Langfuse cost is an estimate for model generations, not
 the complete application cost or AWS invoice.
@@ -52,19 +53,28 @@ cd /workshop/05-observability/05cc-langfuse-cost-attribution
 ./scripts/deploy-cost-attribution.sh --region us-west-2
 ```
 
-The script requires the existing two-replica Lab 5A deployment and its Service,
-source ranges, PDB, service account, and Secrets. It builds and pushes a
-`lab05cc-agent-<timestamp>` image, verifies the Lab 5A-compatible image lineage,
-service account, PDB, replica count, source ranges, and Secret references, then
-captures the current application image and changes only the
-`mortgage-assistant` container image. It waits for readiness and sends one
-authenticated smoke request through the existing client. If rollout, readiness,
-or smoke validation fails, it restores the captured image. It never replaces
-either Secret and never reapplies the Service or its source ranges. The
-deployment shell does not capture, print, or pass credential values in process
-arguments; the smoke client reads the API key in-process without printing or
-persisting it, while the Langfuse Secret value remains unread. The summary
-includes the Langfuse URL and smoke trace ID.
+The script selects one of two modes automatically:
+
+- **Fresh mode:** When the `mortgage-assistant` namespace is absent, it creates
+  the namespace, service account, API-key and Langfuse Kubernetes Secrets,
+  two-replica Deployment, PDB, and source-restricted Network Load Balancer. The
+  caller's detected public IPv4 `/32` is the default source range; use
+  `--service-access-cidr` to provide another restricted CIDR. It streams
+  Langfuse bootstrap credentials from the existing in-cluster Langfuse
+  deployment directly into the Kubernetes Secret without putting them in
+  command arguments or rendered files.
+- **Overlay mode:** When a complete canonical Lab 5A or prior 5CC workload
+  exists, it preserves the Service, source ranges, Secrets, environment, PDB,
+  and service account, and changes only the application image.
+
+Both modes wait for rollout and readiness, then send one authenticated smoke
+request. A failed fresh deployment removes only the namespace that invocation
+created, after verifying its ownership label. A failed overlay restores the
+captured previous image. If the namespace exists but is incomplete or belongs
+to another checkpoint, the script fails before mutation.
+
+The smoke client reads the API key in-process without printing or persisting it.
+The summary includes the deployment mode, Langfuse URL, and smoke trace ID.
 
 The workshop NLB is source-restricted but uses plaintext HTTP. Bearer
 authentication does not encrypt transport. Use only synthetic workshop data;
@@ -133,26 +143,40 @@ size of a later generation.
 
 ## Build the dashboard
 
-Create a Langfuse dashboard named `Mortgage Assistant Token and Cost Report`.
-Create widgets from the Observations data source and filter to model-generation
-observations. Apply:
+Langfuse includes a curated Cost Dashboard with standard totals and breakdowns
+by model, environment, user, trace name, and observation name. Open
+**Dashboards** and use that managed dashboard as a starting point; editing it
+creates a project-owned copy.
 
+Create a dashboard named `Mortgage Assistant Token and Cost Report`. Create
+widgets from the Observations data source and filter them to:
+
+- observation type: `generation`
 - application metadata: `mortgage-assistant`
-- environment metadata: `workshop`
+- environment: `workshop`
 - release: `mortgage-assistant-release-1.0`
 - session ID: the printed `REPORT_SESSION_ID`
 
-Group by `metadata.agent_name`. The minimum dashboard always contains:
+Langfuse can filter arbitrary metadata, but its dashboard builder cannot
+currently use `metadata.agent_name` as a breakdown dimension. Create one Agent
+widget, then duplicate it three times and give each copy one of these filters:
 
-1. A table with Agent name, generation count, summed input tokens, summed output
-   tokens, summed total tokens, and average latency.
-2. Total input tokens.
-3. Total output tokens.
+```text
+metadata.agent_name = mortgage_supervisor
+metadata.agent_name = mortgage_education_specialist
+metadata.agent_name = existing_mortgage_specialist
+metadata.agent_name = mortgage_application_specialist
+```
 
-If Langfuse recognizes the model price, add summed estimated cost to the Agent
-table plus total-cost and cost-by-Agent widgets. If pricing is unavailable,
-omit those cost measures and widgets and label the pilot result `Pricing
-unavailable for us.anthropic.claude-sonnet-4-6`; never substitute `$0.00`.
+Each Agent widget should show generation count, summed input tokens, summed
+output tokens, summed total tokens, and average latency. If Langfuse recognizes
+the model price, also include summed estimated cost. If pricing is unavailable,
+omit cost measures and label the dashboard `Pricing unavailable for
+us.anthropic.claude-sonnet-4-6`; never substitute `$0.00`.
+
+Add separate total input-token and output-token widgets using the same filters
+without an Agent-name filter. Add a total-cost widget only when pricing was
+confirmed.
 
 Use downloaded CSV values or generation details at their available unrounded
 precision when reconciling the report. Token totals must exactly equal the sum
@@ -182,9 +206,9 @@ Langfuse.
 
 ## Restore the previous checkpoint
 
-The pilot updates the same application Deployment. Kubernetes rollout history
-is not a deterministic restore point after repeated pilot deployments. To
-restore the Lab 5A application explicitly, redeploy that checkpoint:
+In overlay mode, Kubernetes rollout history is not a deterministic restore point
+after repeated pilot deployments. To restore the Lab 5A application explicitly,
+redeploy that checkpoint:
 
 ```bash
 cd /workshop/05-observability/05a-langfuse

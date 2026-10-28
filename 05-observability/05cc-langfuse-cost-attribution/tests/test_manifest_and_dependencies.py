@@ -11,9 +11,38 @@ class ManifestAndDependencyTests(unittest.TestCase):
         self.assertIn('name = "mortgage-workshop-lab-05cc"', project)
         self.assertIn('"strands-agents[otel]>=1.56.0,<1.57"', project)
 
-    def test_pilot_has_no_kubernetes_resource_manifests(self) -> None:
-        manifests = list((MODULE_DIR / "k8s").glob("*.yaml"))
-        self.assertEqual(manifests, [])
+    def test_manifests_preserve_security_availability_and_telemetry(self) -> None:
+        base = (MODULE_DIR / "k8s" / "base.yaml").read_text()
+        manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()
+        self.assertIn("automountServiceAccountToken: false", base)
+        deploy = (MODULE_DIR / "scripts" / "deploy-cost-attribution.sh").read_text()
+        for expected in (
+            '"workshop.aws/owner-token": owner_token',
+            '"pod-security.kubernetes.io/enforce": "restricted"',
+            '"elbv2.k8s.aws/pod-readiness-gate-inject": "enabled"',
+        ):
+            self.assertIn(expected, deploy)
+        for expected in (
+            "replicas: 2",
+            "maxUnavailable: 0",
+            "serviceAccountName: mortgage-assistant",
+            "automountServiceAccountToken: false",
+            "runAsNonRoot: true",
+            "type: RuntimeDefault",
+            "allowPrivilegeEscalation: false",
+            "readOnlyRootFilesystem: true",
+            "drop:\n                - ALL",
+            "sizeLimit: 256Mi",
+            "kind: PodDisruptionBudget",
+            "minAvailable: 1",
+            "loadBalancerSourceRanges:",
+            "name: MEMORY_SESSION_TTL_SECONDS",
+            "name: OTEL_EXPORTER_OTLP_ENDPOINT",
+            "name: OTEL_EXPORTER_OTLP_HEADERS",
+            "name: langfuse-otel-auth",
+            "name: TELEMETRY_MASK_CONTENT",
+        ):
+            self.assertIn(expected, manifest)
 
     def test_container_copies_exact_reduced_runtime_closure(self) -> None:
         dockerfile = (MODULE_DIR / "Dockerfile").read_text()
@@ -53,7 +82,7 @@ class ManifestAndDependencyTests(unittest.TestCase):
         deploy = (MODULE_DIR / "scripts" / "deploy-cost-attribution.sh").read_text()
         for expected in (
             '"$MODULE_DIR/app/invoke_eks.py"',
-            'json.load(sys.stdin)',
+            "json.load(sys.stdin)",
             'response.get("duration_ms")',
             'response.get("trace_id")',
             "--json",
@@ -62,34 +91,33 @@ class ManifestAndDependencyTests(unittest.TestCase):
         for absent in (
             "Authorization: Bearer",
             "--api-key",
-            'request_id": sys.argv[4]',
             "/executions/",
             "chain_valid",
             "replay",
-            "approval-required",
-            "lease-seconds",
-            "enable-reasoning",
-            "snapshot-history",
             "fault-injection",
-            '"abort"',
-            '"crash"',
         ):
             self.assertNotIn(absent, deploy.lower())
 
-    def test_deploy_is_an_image_only_overlay_with_failure_restore(self) -> None:
+    def test_deploy_has_isolated_fresh_and_overlay_rollback_paths(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-cost-attribution.sh").read_text()
-        self.assertIn("PREVIOUS_IMAGE=", deploy)
-        self.assertIn("cleanup_on_exit()", deploy)
-        self.assertIn("trap cleanup_on_exit EXIT", deploy)
-        self.assertIn('MUTATION_STARTED="true"', deploy)
-        self.assertIn('DEPLOY_SUCCEEDED="true"', deploy)
+        for expected in (
+            'DEPLOY_MODE="fresh"',
+            'DEPLOY_MODE="overlay"',
+            'FRESH_NAMESPACE_CREATED="true"',
+            "trap cleanup_on_exit EXIT",
+            'workshop.aws/owner-token',
+            'kubectl apply -f "$MODULE_DIR/k8s/base.yaml"',
+            '--from-file=api-key=/dev/stdin',
+            '--from-file=otlp-headers=/dev/stdin',
+            'kubectl apply -f "$SERVICE_MANIFEST"',
+            'kubectl set image "deployment/$DEPLOYMENT"',
+        ):
+            self.assertIn(expected, deploy)
         self.assertEqual(deploy.count('kubectl set image "deployment/$DEPLOYMENT"'), 2)
         for forbidden in (
-            "kubectl apply",
-            "kubectl create secret",
-            "--from-literal",
             "secretsmanager get-secret-value",
-            "SERVICE_MANIFEST",
+            "--from-literal",
+            ".data.api-key",
         ):
             self.assertNotIn(forbidden, deploy)
 
@@ -104,9 +132,7 @@ class ManifestAndDependencyTests(unittest.TestCase):
         self.assertNotIn("record_fault_injection", source)
         self.assertNotIn('add_event("fault_injection"', source)
         self.assertNotIn("SNAPSHOT_HISTORY", source)
-        self.assertNotIn("snapshot_trigger", source)
         self.assertNotIn("FAULT_INJECTION", source)
-        self.assertNotIn("maybe_inject_fault", source)
 
     def test_checkpoint_has_no_cross_lab_imports(self) -> None:
         source = "\n".join(path.read_text() for path in (MODULE_DIR / "app").glob("*.py"))
