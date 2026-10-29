@@ -40,7 +40,13 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("session_manager", configuration)
         self.assertNotIn("memory_manager", configuration)
         self.assertNotIn("hooks", configuration)
-        self.assertEqual(configuration["trace_attributes"], attributes)
+        self.assertEqual(
+            configuration["trace_attributes"],
+            telemetry.agent_trace_attributes(
+                attributes,
+                "mortgage_application_specialist",
+            ),
+        )
         self.assertIs(configuration["structured_output_model"], mortgage_agent.SpecialistReport)
         agent_instance.as_tool.assert_called_once_with(
             name="mortgage_application_specialist",
@@ -77,7 +83,10 @@ class AgentContractTests(unittest.TestCase):
         )
         self.assertEqual(
             configuration["trace_attributes"],
-            telemetry.trace_attributes("actor-1", "session-1", "request-1"),
+            telemetry.agent_trace_attributes(
+                telemetry.trace_attributes("actor-1", "session-1", "request-1"),
+                "mortgage_supervisor",
+            ),
         )
         self.assertIs(result, supervisor)
 

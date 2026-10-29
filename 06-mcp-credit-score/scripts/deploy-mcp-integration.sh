@@ -212,30 +212,34 @@ fi
 
 kubectl apply -f "$MODULE_DIR/k8s/base.yaml"
 
-if [[ -n "${MORTGAGE_API_KEY:-}" ]]; then
-  API_KEY="$MORTGAGE_API_KEY"
-elif kubectl get secret mortgage-assistant-api-key \
+if [[ "${MORTGAGE_API_KEY+x}" == "x" ]]; then
+  if [[ -z "${MORTGAGE_API_KEY//[[:space:]]/}" ]]; then
+    echo "The mortgage-assistant API key must not be empty." >&2
+    exit 1
+  fi
+  printf '%s' "$MORTGAGE_API_KEY" |
+    kubectl create secret generic mortgage-assistant-api-key \
+      --namespace mortgage-assistant \
+      --from-file=api-key=/dev/stdin \
+      --dry-run=client \
+      --output=yaml |
+    kubectl apply -f -
+  unset MORTGAGE_API_KEY
+elif ! kubectl get secret mortgage-assistant-api-key \
   --namespace mortgage-assistant >/dev/null 2>&1; then
-  API_KEY="$(kubectl get secret mortgage-assistant-api-key \
-    --namespace mortgage-assistant \
-    --output jsonpath='{.data.api-key}' | base64 --decode)"
-else
-  API_KEY="$(openssl rand -hex 32)"
-fi
-if [[ -z "${API_KEY//[[:space:]]/}" ]]; then
-  echo "The mortgage-assistant API key must not be empty." >&2
-  exit 1
+  openssl rand -hex 32 | tr -d '\n' |
+    kubectl create secret generic mortgage-assistant-api-key \
+      --namespace mortgage-assistant \
+      --from-file=api-key=/dev/stdin \
+      --dry-run=client \
+      --output=yaml |
+    kubectl apply -f -
 fi
 
-kubectl create secret generic mortgage-assistant-api-key \
-  --namespace mortgage-assistant \
-  --from-literal="api-key=$API_KEY" \
-  --dry-run=client \
-  --output=yaml |
-  kubectl apply -f -
-
-SERVICE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mortgage-lab06-service.XXXXXX.yaml")"
-trap 'rm -f "$SERVICE_MANIFEST"' EXIT
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mortgage-lab06.XXXXXX")"
+SERVICE_MANIFEST="$WORK_DIR/service.yaml"
+SMOKE_STATE_FILE="$WORK_DIR/client-state.json"
+trap 'rm -f "$SERVICE_MANIFEST" "$SMOKE_STATE_FILE"; rmdir "$WORK_DIR" 2>/dev/null || true' EXIT
 
 for template_variable in \
   IMAGE_URI REGION MODEL_ID KB_PARAMETER_NAME MEMORY_TABLE_NAME \
@@ -325,26 +329,29 @@ fi
 
 SMOKE_ACTOR="deployment-smoke-test"
 SMOKE_SESSION="session-$(date -u +%Y%m%d%H%M%S)"
-PROMPT_JSON="$(python3 -c \
-  'import json, sys; print(json.dumps({"prompt": sys.argv[1], "actor_id": sys.argv[2], "session_id": sys.argv[3]}))' \
-  "$PROMPT" "$SMOKE_ACTOR" "$SMOKE_SESSION")"
 
 echo
 echo "Lab 06 smoke-test response:"
-SMOKE_RESPONSE="$(curl --fail-with-body --silent --show-error \
-  --max-time 300 \
-  --request POST \
-  "http://${SERVICE_ENDPOINT}/invoke" \
-  --header "Authorization: Bearer ${API_KEY}" \
-  --header "Content-Type: application/json" \
-  --data "$PROMPT_JSON")"
+SMOKE_RESPONSE="$(uv run --project "$MODULE_DIR" --frozen python \
+  "$MODULE_DIR/app/invoke_eks.py" \
+  --region "$REGION" \
+  --url "http://${SERVICE_ENDPOINT}" \
+  --namespace mortgage-assistant \
+  --secret mortgage-assistant-api-key \
+  --actor-id "$SMOKE_ACTOR" \
+  --session-id "$SMOKE_SESSION" \
+  --state-file "$SMOKE_STATE_FILE" \
+  --prompt "$PROMPT" \
+  --timeout 300 \
+  --json)"
 echo "$SMOKE_RESPONSE"
-read -r SMOKE_REQUEST_ID SMOKE_TRACE_ID < <(python3 - "$SMOKE_RESPONSE" <<'PYEOF'
+read -r SMOKE_REQUEST_ID SMOKE_TRACE_ID < <(
+  printf '%s' "$SMOKE_RESPONSE" | python3 -c '
 import json
 import re
 import sys
 
-response = json.loads(sys.argv[1])
+response = json.load(sys.stdin)
 required = ("request_id", "actor_id", "session_id", "response", "duration_ms", "trace_id")
 missing = [field for field in required if field not in response]
 if missing:
@@ -357,7 +364,7 @@ trace_id = response.get("trace_id")
 if not isinstance(trace_id, str) or not re.fullmatch(r"[0-9a-f]{32}", trace_id):
     sys.exit("Lab 6 smoke response did not include a valid trace_id")
 print(response["request_id"], trace_id)
-PYEOF
+'
 )
 
 cat <<EOF
@@ -374,7 +381,9 @@ Lab 06 completed.
   Smoke-test request ID: $SMOKE_REQUEST_ID (ephemeral correlation; session $SMOKE_SESSION)
 
 The credit-score MCP server resources in credit-services were inspected and invoked but not modified.
-The existing mortgage-assistant API key and Langfuse OTLP Secret were reused and were not printed.
+The existing Langfuse OTLP Secret was reused. The API key was streamed through
+stdin when creation or replacement was needed, and the smoke client read it
+in-process. Credential values were not printed or placed in child-process arguments.
 
 Try it (from 06-mcp-credit-score):
   uv run app/invoke_eks.py --region $REGION --prompt \

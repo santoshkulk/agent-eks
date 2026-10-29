@@ -1,10 +1,12 @@
 # Lab 6: Add a credit-score MCP tool to the traced mortgage assistant
 
-Lab 6 is a complete checkpoint of the simplified Lab 5a assistant. It keeps
-OpenTelemetry/Langfuse tracing, a latest-only supervisor session snapshot, and
-actor-scoped durable memory, then adds one remote MCP tool named
-`get_credit_score`. Every request creates a fresh Strands supervisor and fresh
-specialists. Only the supervisor has session and memory managers.
+Lab 6 is a complete checkpoint of the simplified Lab 5 assistant. It keeps
+OpenTelemetry/Langfuse tracing with application, environment, release
+`mortgage-assistant-release-1.1`, and per-Agent generation attribution, plus a
+latest-only supervisor session snapshot and actor-scoped durable memory. It then
+adds one remote MCP tool named `get_credit_score`. Every request creates a fresh
+Strands supervisor and fresh specialists. Only the supervisor has session and
+memory managers.
 
 Use only synthetic workshop data. The returned score is synthetic and this
 workshop is not a production mortgage, lending, identity, credit, financial,

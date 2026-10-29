@@ -27,6 +27,10 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 logger = logging.getLogger("telemetry")
 
+APPLICATION_NAME = "mortgage-assistant"
+APPLICATION_ENVIRONMENT = "workshop"
+APPLICATION_RELEASE = "mortgage-assistant-release-1.1"
+
 _trace_attributes_var: contextvars.ContextVar[dict[str, object] | None] = (
     contextvars.ContextVar("trace_attributes", default=None)
 )
@@ -197,11 +201,32 @@ def trace_attributes(
     session_id: str,
     request_id: str,
 ) -> dict[str, object]:
-    """Build the trace attributes shared by every agent in one request."""
+    """Build trace-wide correlation and Agent-attribution attributes."""
     return {
         "session.id": session_id,
         "user.id": actor_id,
-        "tags": ["mortgage-assistant", f"request:{request_id}"],
+        "tags": [
+            APPLICATION_NAME,
+            APPLICATION_RELEASE,
+            f"request:{request_id}",
+        ],
+        "langfuse.trace.metadata.application": APPLICATION_NAME,
+        "langfuse.trace.metadata.environment": APPLICATION_ENVIRONMENT,
+        "langfuse.release": APPLICATION_RELEASE,
+        "langfuse.environment": APPLICATION_ENVIRONMENT,
+    }
+
+
+def agent_trace_attributes(
+    attributes: dict[str, object] | None,
+    agent_name: str,
+) -> dict[str, object]:
+    """Copy request attributes and identify the Agent owning nested generations."""
+    if not agent_name.strip():
+        raise ValueError("agent_name must not be empty")
+    return {
+        **(attributes or {}),
+        "langfuse.observation.metadata.agent_name": agent_name,
     }
 
 

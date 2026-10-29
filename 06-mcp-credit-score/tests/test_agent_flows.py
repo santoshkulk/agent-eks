@@ -6,6 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -88,6 +93,44 @@ class SupervisorSessionFlowTests(unittest.TestCase):
             session_factory=self.session_factory(session_id),
             use_memory=False,
             specialists=["existing_mortgage_specialist"],
+        )
+
+    def test_000_generation_spans_include_agent_attribution(self) -> None:
+        capture = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(capture))
+        trace.set_tracer_provider(provider)
+
+        attributes = telemetry.trace_attributes("actor-1", "session-1", "request-1")
+        with telemetry.use_trace_attributes(attributes):
+            result = self.create_supervisor()("What is the balance for customer C1?")
+        provider.force_flush()
+
+        self.assertIn("specialist report", str(result))
+        generation_spans = [
+            span for span in capture.get_finished_spans() if span.name == "chat"
+        ]
+        self.assertTrue(generation_spans, "Expected at least one model-generation span")
+
+        expected_attributes = {
+            "langfuse.trace.metadata.application": "mortgage-assistant",
+            "langfuse.trace.metadata.environment": "workshop",
+            "langfuse.release": "mortgage-assistant-release-1.1",
+            "langfuse.environment": "workshop",
+        }
+        observed_agents = set()
+        for span in generation_spans:
+            for key, value in expected_attributes.items():
+                self.assertEqual(span.attributes.get(key), value)
+            agent_name = span.attributes.get(
+                "langfuse.observation.metadata.agent_name"
+            )
+            self.assertIsNotNone(agent_name)
+            observed_agents.add(agent_name)
+
+        self.assertEqual(
+            observed_agents,
+            {"mortgage_supervisor", "existing_mortgage_specialist"},
         )
 
     def test_supervisor_snapshot_restores_follow_up_context(self) -> None:

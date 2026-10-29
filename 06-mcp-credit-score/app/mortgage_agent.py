@@ -358,6 +358,10 @@ def create_specialist_tool(name: str, *, model: Any = None) -> Any:
     spec = SPECIALISTS[name]
     if name == "mortgage_education_specialist" and model is None:
         get_knowledge_base_id()
+    attributes = telemetry.agent_trace_attributes(
+        telemetry.current_trace_attributes(),
+        name,
+    )
     agent = Agent(
         model=model if model is not None else MODEL_ID,
         name=name,
@@ -367,7 +371,7 @@ def create_specialist_tool(name: str, *, model: Any = None) -> Any:
         tools=spec["tools"],
         structured_output_model=SpecialistReport,
         callback_handler=None,
-        trace_attributes=telemetry.current_trace_attributes(),
+        trace_attributes=attributes,
     )
     return agent.as_tool(name=name, description=spec["description"], preserve_context=True)
 
@@ -388,6 +392,10 @@ def create_supervisor_agent(
     attributes = telemetry.current_trace_attributes() or telemetry.trace_attributes(
         actor_id, session_id, request_id
     )
+    supervisor_attributes = telemetry.agent_trace_attributes(
+        attributes,
+        "mortgage_supervisor",
+    )
     with telemetry.use_trace_attributes(attributes):
         specialist_tools = [
             create_specialist_tool(name, model=specialist_model)
@@ -407,7 +415,7 @@ def create_supervisor_agent(
             tools=[*specialist_tools, calculator, remote_credit_score_tool],
             hooks=[CurrentPromptHook(SUPERVISOR_PROMPT), ToolResultCapHook()],
             callback_handler=None,
-            trace_attributes=attributes,
+            trace_attributes=supervisor_attributes,
             system_prompt=SUPERVISOR_PROMPT,
         )
 

@@ -146,6 +146,38 @@ class TraceContextTests(unittest.TestCase):
     def tearDown(self) -> None:
         telemetry.set_current_trace_attributes(None)
 
+    def test_attributes_include_agent_reporting_dimensions(self) -> None:
+        self.assertEqual(
+            telemetry.trace_attributes("actor-1", "session-1", "request-1"),
+            {
+                "session.id": "session-1",
+                "user.id": "actor-1",
+                "tags": [
+                    "mortgage-assistant",
+                    "mortgage-assistant-release-1.1",
+                    "request:request-1",
+                ],
+                "langfuse.trace.metadata.application": "mortgage-assistant",
+                "langfuse.trace.metadata.environment": "workshop",
+                "langfuse.release": "mortgage-assistant-release-1.1",
+                "langfuse.environment": "workshop",
+            },
+        )
+
+    def test_agent_attributes_are_copied_and_identify_generation_owner(self) -> None:
+        request = telemetry.trace_attributes("actor-1", "session-1", "request-1")
+        specialist = telemetry.agent_trace_attributes(
+            request,
+            "existing_mortgage_specialist",
+        )
+        self.assertEqual(
+            specialist["langfuse.observation.metadata.agent_name"],
+            "existing_mortgage_specialist",
+        )
+        self.assertNotIn("langfuse.observation.metadata.agent_name", request)
+        with self.assertRaisesRegex(ValueError, "agent_name must not be empty"):
+            telemetry.agent_trace_attributes(request, " ")
+
     def test_attributes_round_trip_and_can_be_cleared(self) -> None:
         attributes = telemetry.trace_attributes("actor-1", "session-1", "request-1")
         telemetry.set_current_trace_attributes(attributes)

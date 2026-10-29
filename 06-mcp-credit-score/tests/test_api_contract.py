@@ -63,11 +63,11 @@ class ApiContractTests(unittest.TestCase):
             self.client.post("/invoke", headers=self.headers, json=self._body())
         span.assert_called_once_with(
             "mortgage_assistant.invoke",
-            {
-                "session.id": "session-1",
-                "user.id": "participant-123456789012",
-                "tags": ["mortgage-assistant", "request:request-1"],
-            },
+            mortgage_api.telemetry.trace_attributes(
+                "participant-123456789012",
+                "session-1",
+                "request-1",
+            ),
         )
 
     @patch("mortgage_api.telemetry.current_trace_id", return_value=None)

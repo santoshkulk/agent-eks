@@ -13,9 +13,7 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally. |
 | 3 | `03-eks-service` | Deploy the assistant as a persistent two-replica FastAPI service on EKS. |
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB, turn the specialists into persistent agents-as-tools, and add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
-| 5a | `05-observability/05a-langfuse` | Export correlated Strands traces to self-hosted Langfuse and inspect model/tool latency, token usage, and controlled failures. |
-| 5b | `05-observability/05b-cloudwatch-omni` | Optional: send the same traces to Amazon CloudWatch Omni, alongside or instead of Langfuse. |
-| 5CC | `05-observability/05cc-langfuse-cost-attribution` | Pilot: deploy Agent-attributed Langfuse telemetry and build session and application token/cost reports. |
+| 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse with application, environment, release, and per-Agent generation attribution. |
 | 6 | `06-mcp-credit-score` | Explore an MCP server, integrate its tool with the Strands supervisor, and deploy the updated agent to EKS. |
 
 Numbered application modules are self-contained checkpoints. Runtime modules do not import code from earlier lab directories.
@@ -42,9 +40,13 @@ Lab 4 updates those resources in place and adds:
 - Resumable execution: request-level idempotency, a per-session lease with heartbeat, a tool ledger for exactly-once effects, rollback of unfinished turns, and Strands interrupts that pause side-effecting tool calls for human approval and survive pod restarts.
 - A stateful participant client and deterministic hydration utilities.
 
-Lab 5 updates the service with OpenTelemetry/Langfuse tracing, request correlation (trace IDs are recorded on the audit trail and returned by the API), content masking, and controlled fault injection.
+Lab 5 updates the service with OpenTelemetry/Langfuse tracing, request correlation,
+content masking, and application, environment, release, and per-Agent generation
+attribution. Trace IDs are returned by the API.
 
-Lab 6 is a complete checkpoint of Lab 5. Participants first use the installed MCP server independently, then the application adds:
+Lab 6 is a complete checkpoint of Lab 5. It retains the Langfuse attribution
+with release `mortgage-assistant-release-1.1`. Participants first use the
+installed MCP server independently, then the application adds:
 
 - `mcp==2.1.1` and Streamable HTTP.
 - A fixed-target explorer for info, discovery, schema inspection, invocation, and live contract verification.
@@ -124,35 +126,16 @@ uv run app/invoke_eks.py --region us-west-2 --trail last
 
 See [`04-memory/README.md`](04-memory/README.md) for the session, pod replacement, durable recall, actor-scoping, inspection, audit and explanation, failed-request resume, approval, and cleanup exercises.
 
-## Lab 5a: Add OpenTelemetry and Langfuse Observability
+## Lab 5: Add OpenTelemetry and Langfuse Observability
 
 ```bash
-cd ../05-observability/05a-langfuse
+cd ../05-observability
 uv run python -m unittest discover --start-directory tests --verbose
 ./scripts/deploy-observability.sh --region us-west-2
 ```
 
-See [`05-observability/05a-langfuse/README.md`](05-observability/05a-langfuse/README.md) for trace correlation, content masking, controlled fault injection, and Langfuse exercises.
-
-## Lab 5b: Send traces to CloudWatch Omni (optional)
-
-```bash
-cd ../05b-cloudwatch-omni
-uv run python -m unittest discover --start-directory tests --verbose
-./scripts/deploy-omni.sh --region us-west-2
-```
-
-See [`05-observability/05b-cloudwatch-omni/README.md`](05-observability/05b-cloudwatch-omni/README.md).
-
-## Lab 5CC: Pilot Agent token and estimated-cost attribution
-
-```bash
-cd /workshop/05-observability/05cc-langfuse-cost-attribution
-uv run python -m unittest discover --start-directory tests --verbose
-./scripts/deploy-cost-attribution.sh --region us-west-2
-```
-
-See [`05-observability/05cc-langfuse-cost-attribution/README.md`](05-observability/05cc-langfuse-cost-attribution/README.md) for the isolated metadata deployment, per-generation inspection, session report, monthly application rollup, and restoration steps. This pilot does not modify the 5A or 5B source checkpoints.
+See [`05-observability/README.md`](05-observability/README.md) for trace
+correlation, content masking, model token usage, and per-Agent attribution.
 
 ## Lab 6: Integrate MCP Tools with the Strands Agent
 
@@ -184,7 +167,7 @@ uv run app/invoke_eks.py \
   --prompt "Get the credit score for synthetic customer ID workshop-customer-12345."
 ```
 
-The deployment preserves the existing `mortgage-assistant` NLB, Service, service account, Pod Identity association, Knowledge Base, DynamoDB memory resources, and OpenTelemetry configuration. It reapplies the API-key Secret while retaining its value unless explicitly overridden, and reads the existing Langfuse OTLP Secret without reapplying it. It verifies but does not modify `credit-services`.
+The deployment preserves the existing `mortgage-assistant` NLB, Service, service account, Pod Identity association, Knowledge Base, DynamoDB memory resources, and OpenTelemetry configuration. It preserves the API-key Secret unless an explicit replacement is supplied, and reads the existing Langfuse OTLP Secret without reapplying it. It verifies but does not modify `credit-services`.
 
 See [`06-mcp-credit-score/README.md`](06-mcp-credit-score/README.md) for the complete contract, safety, observability, troubleshooting, and `mortgage-assistant`-only cleanup exercises.
 

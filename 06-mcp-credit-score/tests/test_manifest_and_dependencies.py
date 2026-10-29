@@ -75,19 +75,21 @@ class ManifestAndDependencyTests(unittest.TestCase):
         ):
             self.assertNotIn(f"app/{removed}.py", dockerfile)
 
-    def test_deploy_smoke_uses_reduced_contract_and_trace_id(self) -> None:
+    def test_deploy_smoke_uses_client_and_reduced_contract(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-mcp-integration.sh").read_text()
         for expected in (
-            '"prompt": sys.argv[1]',
-            '"actor_id": sys.argv[2]',
-            '"session_id": sys.argv[3]',
-            "curl --fail-with-body",
+            '"$MODULE_DIR/app/invoke_eks.py"',
+            "json.load(sys.stdin)",
             'response.get("duration_ms")',
             'response.get("trace_id")',
+            "--state-file",
+            "--json",
             '"$MODULE_DIR/scripts/explore_credit_score_mcp.py" verify',
         ):
             self.assertIn(expected, deploy)
         for absent in (
+            "Authorization: Bearer",
+            "--api-key",
             'request_id": sys.argv[4]',
             "/executions/",
             "chain_valid",

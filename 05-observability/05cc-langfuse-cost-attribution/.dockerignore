@@ -1,9 +1,0 @@
-.git
-.venv
-.workshop
-**/__pycache__
-**/*.pyc
-tests
-README.md
-k8s
-scripts
