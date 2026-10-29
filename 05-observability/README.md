@@ -242,18 +242,16 @@ tag. It is not accepted from clients and is not an idempotency key.
 
 ## Langfuse exercises
 
-1. Send an existing-mortgage prompt and open its printed trace ID in Langfuse.
-   Follow `mortgage_assistant.invoke` into the supervisor, specialist, model,
-   and `get_mortgage_details` spans. Compare latency and token attributes.
-2. Send two prompts with the same session. In Langfuse Sessions, verify both
-   traces share `session.id`; use `user.id` to find the workshop actor.
-3. Start a new session for the same actor. Confirm it does not restore the old
-   transcript, while an explicitly stored durable preference can still be
-   retrieved because semantic memory is actor scoped.
-4. Compare unmasked traces with a deployment using
-   `--telemetry-mask-content --image-uri <image>`. Verify content is redacted
-   while route, tool, status, latency, token, user, session, and request-tag
-   fields remain useful.
+1. Open the deployment smoke trace by its printed trace ID. Follow
+   `mortgage_assistant.invoke` into the supervisor, selected specialist, model
+   generations, memory, and tool spans that are present.
+2. Select a `generation` observation and inspect its model, input/output/total
+   tokens, latency, estimated cost when available, and
+   `metadata.agent_name`. Use generation values rather than cumulative Agent
+   span totals to avoid double-counting model usage.
+3. Open Langfuse's managed Cost Dashboard, select a time range containing the
+   smoke request, and explore its aggregate project views. Do not create,
+   duplicate, or edit a dashboard for this exercise.
 
 ## Inspect memory
 
