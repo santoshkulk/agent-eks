@@ -10,7 +10,7 @@ Workshop Studio deploys `credit-services` and provisions the shared AWS environm
 | --- | --- | --- |
 | 0 | `00-workshop-setup` | Optional standalone setup for shared Knowledge Base, EKS, ECR, IAM, load-balancing, and DynamoDB memory resources. |
 | 1 | `01-test-knowledge-base` | Query the Knowledge Base, inspect EKS, and independently initialize/list/call the installed MCP server. |
-| 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally. |
+| 2 | `02-local-strands` | Run the multi-agent Strands mortgage assistant locally and optionally compare allowed and denied requests with a pre-provisioned Bedrock Guardrail. |
 | 3 | `03-eks-service` | Deploy the assistant as a persistent two-replica FastAPI service on EKS. |
 | 4 | `04-memory` | Add short-term sessions and durable semantic memory backed by DynamoDB, turn the specialists into persistent agents-as-tools, and add a hash-chained audit trail, per-response explanations, resumable failed requests, and human approval pauses. |
 | 5 | `05-observability` | Export correlated Strands traces to self-hosted Langfuse with application, environment, release, and per-Agent generation attribution. |
@@ -102,6 +102,10 @@ cd ../02-local-strands
 uv run mortgage_agent.py \
   --prompt "Compare 15-year and 30-year mortgages"
 ```
+
+Use `--enable-guardrail` only for the optional Workshop Studio-provisioned
+allowed-versus-denied comparison. See
+[`02-local-strands/README.md`](02-local-strands/README.md).
 
 ## Lab 3: Deploy the EKS Service
 

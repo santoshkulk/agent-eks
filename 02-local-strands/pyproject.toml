@@ -5,7 +5,7 @@ description = "Run the Strands mortgage assistant locally"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.40.0",
-    "strands-agents",
+    "strands-agents>=1.56.0,<1.57",
     "strands-agents-tools==0.2.6",
 ]
 

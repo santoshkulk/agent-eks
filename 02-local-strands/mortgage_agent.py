@@ -11,7 +11,9 @@ from typing import Any
 from uuid import uuid4
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from strands import Agent, tool
+from strands.models import BedrockModel
 from strands_tools import calculator
 from strands_tools.retrieve import retrieve
 
@@ -21,6 +23,12 @@ MODEL_ID = os.environ.get(
     "us.anthropic.claude-sonnet-4-6",
 )
 KB_PARAMETER_NAME = os.environ.get("KB_PARAMETER_NAME")
+GUARDRAIL_ID_PARAMETER_NAME = (
+    "/workshop/mortgage-assistant/bedrock/guardrail-id"
+)
+GUARDRAIL_VERSION_PARAMETER_NAME = (
+    "/workshop/mortgage-assistant/bedrock/guardrail-version"
+)
 CUSTOMER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SPECIALIST_TOOLS = {
     "answer_general_mortgage_questions": "mortgage_education_specialist",
@@ -38,6 +46,10 @@ KNOWLEDGE_RETRIEVAL_FAILURE_RESPONSE = (
 _RETRIEVAL_OUTCOME: ContextVar[dict[str, Any] | None] = ContextVar(
     "mortgage_retrieval_outcome",
     default=None,
+)
+_GUARDRAIL_ENABLED: ContextVar[bool] = ContextVar(
+    "mortgage_guardrail_enabled",
+    default=False,
 )
 _ZERO_RESULT_MARKERS = (
     "retrieved 0 results",
@@ -118,6 +130,66 @@ def _get_aws_region() -> str:
     if not region:
         raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION must be configured")
     return region
+
+
+@lru_cache(maxsize=1)
+def get_guardrail_configuration() -> tuple[str, str]:
+    """Resolve the immutable workshop Guardrail ID and version."""
+    parameter_names = [
+        GUARDRAIL_ID_PARAMETER_NAME,
+        GUARDRAIL_VERSION_PARAMETER_NAME,
+    ]
+    try:
+        response = boto3.client("ssm", region_name=_get_aws_region()).get_parameters(
+            Names=parameter_names,
+        )
+    except (BotoCoreError, ClientError) as error:
+        raise RuntimeError(
+            "Unable to retrieve the Workshop Guardrail configuration"
+        ) from error
+
+    invalid_parameters = set(response.get("InvalidParameters", []))
+    values = {
+        parameter["Name"]: str(parameter.get("Value", "")).strip()
+        for parameter in response.get("Parameters", [])
+    }
+    missing_parameters = [
+        name
+        for name in parameter_names
+        if name in invalid_parameters or not values.get(name)
+    ]
+    if missing_parameters:
+        raise RuntimeError(
+            "Workshop Guardrail configuration is missing or empty: "
+            + ", ".join(missing_parameters)
+        )
+
+    return (
+        values[GUARDRAIL_ID_PARAMETER_NAME],
+        values[GUARDRAIL_VERSION_PARAMETER_NAME],
+    )
+
+
+def create_model() -> str | BedrockModel:
+    """Return the existing model unless this invocation enables Guardrails."""
+    if not _GUARDRAIL_ENABLED.get():
+        return MODEL_ID
+
+    guardrail_id, guardrail_version = get_guardrail_configuration()
+    return BedrockModel(
+        model_id=MODEL_ID,
+        region_name=_get_aws_region(),
+        guardrail_id=guardrail_id,
+        guardrail_version=guardrail_version,
+        guardrail_trace="disabled",
+        guardrail_stream_processing_mode="sync",
+        guardrail_redact_input=True,
+        guardrail_redact_input_message=(
+            "[Input removed after guardrail intervention.]"
+        ),
+        guardrail_redact_output=False,
+        guardrail_latest_message=False,
+    )
 
 
 def _validate_customer_id(customer_id: str) -> str:
@@ -217,7 +289,7 @@ def answer_general_mortgage_questions(query: str) -> str:
             "Answers general mortgage education questions using the configured "
             "mortgage knowledge base."
         ),
-        model=MODEL_ID,
+        model=create_model(),
         tools=[retrieve_mortgage_knowledge],
         system_prompt="""
         You are a mortgage education specialist.
@@ -284,7 +356,7 @@ def answer_existing_mortgage_questions(query: str) -> str:
     agent = Agent(
         name="existing_mortgage_specialist",
         description="Answers questions about existing mortgage accounts.",
-        model=MODEL_ID,
+        model=create_model(),
         tools=[get_mortgage_details],
         system_prompt="""
         You are an existing mortgage specialist.
@@ -379,7 +451,7 @@ def answer_mortgage_application_questions(query: str) -> str:
             "Handles mortgage application status, document checks, and "
             "application preparation."
         ),
-        model=MODEL_ID,
+        model=create_model(),
         tools=[
             get_mortgage_application_document_statuses,
             get_application_details,
@@ -412,7 +484,7 @@ def create_supervisor_agent() -> Agent:
     return Agent(
         name="mortgage_supervisor",
         description="Routes mortgage requests to matching specialists and tools.",
-        model=MODEL_ID,
+        model=create_model(),
         tools=[
             answer_general_mortgage_questions,
             answer_existing_mortgage_questions,
@@ -444,10 +516,16 @@ def create_supervisor_agent() -> Agent:
     )
 
 
-def run_prompt(prompt: str) -> str:
+def run_prompt(prompt: str, *, enable_guardrail: bool = False) -> str:
+    """Run one prompt with the optional Guardrail scoped to this invocation."""
     if not prompt or not prompt.strip():
         raise ValueError("Prompt must not be empty")
-    return str(create_supervisor_agent()(prompt.strip()))
+
+    token = _GUARDRAIL_ENABLED.set(enable_guardrail)
+    try:
+        return str(create_supervisor_agent()(prompt.strip()))
+    finally:
+        _GUARDRAIL_ENABLED.reset(token)
 
 
 def main() -> int:
@@ -458,9 +536,14 @@ def main() -> int:
         required=True,
         help="Prompt to send to the mortgage assistant.",
     )
+    parser.add_argument(
+        "--enable-guardrail",
+        action="store_true",
+        help="Apply the Workshop mortgage-safety Guardrail to this invocation.",
+    )
     args = parser.parse_args()
     configure_logging()
-    print(run_prompt(args.prompt))
+    print(run_prompt(args.prompt, enable_guardrail=args.enable_guardrail))
     return 0
 
 
