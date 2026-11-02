@@ -517,7 +517,7 @@ def create_supervisor_agent() -> Agent:
 
 
 def run_prompt(prompt: str, *, enable_guardrail: bool = False) -> str:
-    """Run one prompt with the optional Guardrail scoped to this invocation."""
+    """Run one prompt with the request-scoped Guardrail setting."""
     if not prompt or not prompt.strip():
         raise ValueError("Prompt must not be empty")
 

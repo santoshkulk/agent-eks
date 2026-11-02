@@ -1,32 +1,25 @@
 # Lab 02: Run the Strands mortgage assistant locally
 
-This lab introduces the multi-agent mortgage assistant. It uses your laptop's
-AWS credentials and the Knowledge Base deployed in Lab 00. The first `uv run`
-command creates the local environment and installs its locked dependencies
-automatically.
+This lab introduces the multi-agent mortgage assistant and includes a required
+Amazon Bedrock Guardrails evaluation. It uses Workshop Studio AWS credentials,
+the provisioned Knowledge Base, and a numbered mortgage-safety Guardrail. The
+first `uv run` command creates the local environment and installs its locked
+dependencies automatically.
 
 ```bash
 uv run mortgage_agent.py \
   --prompt "What are the benefits of a 15-year mortgage?"
 ```
 
-The default AWS CLI profile is used automatically. To use another profile:
+## Required Bedrock Guardrails evaluation
 
-```bash
-export AWS_PROFILE=my-profile
-export AWS_REGION=us-west-2
+Guardrail evaluation belongs in the prototyping phase. Teams should test an
+Agent with the policies expected in its target environment, whether those are
+enterprise-mandated policies or additional application-specific controls.
 
-uv run mortgage_agent.py \
-  --prompt "When does refinancing make sense?"
-```
-
-## Optional Bedrock Guardrail comparison
-
-Workshop Studio pre-provisions a numbered mortgage-safety Guardrail. It remains
-disabled unless one command passes `--enable-guardrail`; unguarded commands and
-Labs 3 through 6 retain their existing behavior.
-
-Verify that a benign request remains allowed:
+The `--enable-guardrail` flag creates a controlled comparison for this exercise;
+it does not make the exercise optional. First, verify a benign request remains
+allowed:
 
 ```bash
 uv run mortgage_agent.py \
@@ -49,13 +42,15 @@ Expected response:
 I cannot make mortgage approval, eligibility, pricing, or lending decisions.
 ```
 
-The optional flag requires these Workshop Studio parameters:
+The required comparison uses these Workshop Studio parameters:
 
 ```text
 /workshop/mortgage-assistant/bedrock/guardrail-id
 /workshop/mortgage-assistant/bedrock/guardrail-version
 ```
 
-The standalone Lab 00 setup does not provision this optional Guardrail. Do not
-use a default-off flag as a production safety boundary; enforce required
-Guardrails through IAM or account/organization policy.
+Labs 3 through 6 leave this workshop comparison disabled so their deployment,
+memory, observability, and MCP exercises retain their established behavior.
+That isolation is specific to this workshop. Production systems must enforce
+required Guardrails through IAM or account/organization policy rather than a
+caller-controlled flag.
