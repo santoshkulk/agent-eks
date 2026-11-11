@@ -308,10 +308,12 @@ and cleanup do not delete records.
 ./scripts/cleanup-observability.sh --region us-west-2
 ```
 
-Cleanup removes only the participant-owned `mortgage-assistant` namespace and
-load balancer, including `langfuse-otel-auth`. It leaves the shared EKS cluster,
-ECR repository, Knowledge Base, DynamoDB records, and self-hosted Langfuse
-resources managed by Workshop Studio.
+Cleanup removes only the named participant application resources and load
+balancer from the pre-provisioned `mortgage-assistant` namespace, including
+`langfuse-otel-auth`. It preserves the namespace and Workshop Studio-managed
+RBAC. It leaves the shared EKS cluster, ECR repository, Knowledge Base,
+DynamoDB records, and self-hosted Langfuse resources managed by Workshop
+Studio.
 
 Lab 5 is complete when only the supervisor latest snapshot is created, durable
 memory remains actor scoped, two replicas are healthy, the API returns a

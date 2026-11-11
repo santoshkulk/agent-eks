@@ -102,4 +102,4 @@ Never add static AWS credentials to pods or create replacement shared resources.
 
 ## Cleanup boundary
 
-`scripts/cleanup-memory.sh` removes only the `mortgage-assistant` Kubernetes namespace and load balancer. It does not remove the shared DynamoDB table, Knowledge Base, EKS cluster, ECR repository, Pod Identity resources, snapshots, or durable memories. Workshop Studio remains the owner of shared infrastructure.
+`scripts/cleanup-memory.sh` removes only the named participant application resources and load balancer from the pre-provisioned `mortgage-assistant` namespace. It preserves that namespace and Workshop Studio-managed RBAC. It does not remove the shared DynamoDB table, Knowledge Base, EKS cluster, ECR repository, Pod Identity resources, snapshots, or durable memories. Workshop Studio remains the owner of shared infrastructure.

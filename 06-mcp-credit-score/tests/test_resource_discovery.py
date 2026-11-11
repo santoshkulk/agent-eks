@@ -150,6 +150,14 @@ class ResourceDiscoveryTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, deploy)
 
+    def test_base_manifest_owns_only_the_service_account(self) -> None:
+        base = (MODULE_DIR / "k8s" / "base.yaml").read_text()
+        self.assertNotIn("kind: Namespace", base)
+        self.assertIn("kind: ServiceAccount", base)
+        self.assertIn("name: mortgage-assistant", base)
+        self.assertIn("namespace: mortgage-assistant", base)
+        self.assertIn("automountServiceAccountToken: false", base)
+
     def test_scripts_do_not_own_credit_services(self) -> None:
         deploy = (MODULE_DIR / "scripts" / "deploy-mcp-integration.sh").read_text()
         cleanup = (MODULE_DIR / "scripts" / "cleanup-mcp-integration.sh").read_text()
@@ -161,7 +169,28 @@ class ResourceDiscoveryTests(unittest.TestCase):
         self.assertNotIn("kubectl apply -f credit-services", combined)
         self.assertIn("kubectl get deployment credit-score-mcp", deploy)
         self.assertIn("kubectl get endpoints credit-score-mcp", deploy)
-        self.assertIn("kubectl delete namespace mortgage-assistant", cleanup)
+        resources = (
+            "service/mortgage-assistant",
+            "deployment/mortgage-assistant",
+            "poddisruptionbudget/mortgage-assistant",
+            "secret/mortgage-assistant-api-key",
+            "secret/langfuse-otel-auth",
+            "serviceaccount/mortgage-assistant",
+        )
+        positions = []
+        for resource in resources:
+            command = (
+                f"kubectl delete {resource} \\\n"
+                "  --namespace mortgage-assistant \\\n"
+                "  --ignore-not-found \\\n"
+                "  --wait=true \\\n"
+                "  --timeout=15m"
+            )
+            self.assertIn(command, cleanup)
+            positions.append(cleanup.index(command))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("kubectl delete namespace", cleanup)
+        self.assertNotIn("kubectl delete all", cleanup)
 
     def test_python_utilities_create_one_reusable_ssm_client(self) -> None:
         for path in (

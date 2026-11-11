@@ -14,10 +14,12 @@ Options:
   --profile PROFILE  AWS CLI profile; omit to use the default profile.
   -h, --help         Show this help.
 
-This removes the Lab 06 mortgage-assistant application only, including the
-namespaced API-key and Langfuse OTLP Secrets. It does not delete or modify the
-`credit-services` namespace, the Workshop Studio-managed Langfuse
-infrastructure, or other shared AWS resources.
+This removes the Lab 06 participant application resources and Network Load
+Balancer from the pre-provisioned mortgage-assistant namespace, including the
+API-key and Langfuse OTLP Secrets. It preserves that namespace and Workshop
+Studio-managed RBAC. It does not delete or modify the `credit-services`
+namespace, the Workshop Studio-managed Langfuse infrastructure, or other
+shared AWS resources.
 EOF
 }
 
@@ -52,12 +54,40 @@ echo "Removing the Lab 06 mortgage-assistant application and load balancer"
 aws_cli eks update-kubeconfig \
   --name "$CLUSTER_NAME" \
   --alias "$CLUSTER_NAME" >/dev/null
-kubectl delete namespace mortgage-assistant \
+kubectl delete service/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete deployment/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete poddisruptionbudget/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete secret/mortgage-assistant-api-key \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete secret/langfuse-otel-auth \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete serviceaccount/mortgage-assistant \
+  --namespace mortgage-assistant \
   --ignore-not-found \
   --wait=true \
   --timeout=15m
 
-echo "Lab 06 mortgage-assistant application removed."
+echo "Lab 06 participant application resources were removed."
+echo "The pre-provisioned mortgage-assistant namespace and Workshop Studio RBAC"
+echo "were preserved."
 echo "The credit-services namespace was not modified."
 echo "The Workshop Studio-managed Langfuse infrastructure was not modified."
 echo "Shared AWS and DynamoDB resources remain managed by Workshop Studio."

@@ -28,7 +28,10 @@ Request path: (1) the client calls the NLB with an API key, (2) the NLB forwards
 
 ## Application Progression
 
-Lab 3 creates the `mortgage-assistant` application namespace, a two-replica Deployment, an NLB-backed Kubernetes Service, an API-key Secret, and health and invocation routes.
+Lab 3 deploys namespaced `mortgage-assistant` application resources into an
+environment-provisioned namespace, including a two-replica Deployment, an
+NLB-backed Kubernetes Service, an API-key Secret, and health and invocation
+routes.
 
 Lab 4 updates those resources in place and adds:
 
@@ -192,6 +195,6 @@ hoc MCP server; use a Workshop Studio-provisioned environment for those labs.
 
 ## Cleanup
 
-Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only the `mortgage-assistant` application namespace and NLB. It leaves `credit-services` and shared AWS resources unchanged.
+Each deployment module documents its own cleanup scope. Lab 6 cleanup deletes only named participant application resources and the NLB from the pre-provisioned `mortgage-assistant` namespace. It preserves that namespace, Workshop Studio-managed RBAC, `credit-services`, and shared AWS resources.
 
 Shared infrastructure cleanup is destructive and charge-impacting. Run it only in a standalone environment you intentionally provisioned and only after confirming the AWS account and Region.

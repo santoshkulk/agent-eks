@@ -13,11 +13,37 @@ class ManifestAndDependencyTests(unittest.TestCase):
         self.assertIn('"strands-agents-tools==0.2.6"', project)
         self.assertIn('"boto3>=1.43.94,<2"', project)
 
-    def test_namespace_enforces_restricted_pods_and_readiness_gates(self) -> None:
+    def test_base_manifest_owns_only_the_service_account(self) -> None:
         base = (MODULE_DIR / "k8s" / "base.yaml").read_text()
-        self.assertIn("pod-security.kubernetes.io/enforce: restricted", base)
-        self.assertIn("elbv2.k8s.aws/pod-readiness-gate-inject: enabled", base)
+        self.assertNotIn("kind: Namespace", base)
+        self.assertIn("kind: ServiceAccount", base)
+        self.assertIn("name: mortgage-assistant", base)
+        self.assertIn("namespace: mortgage-assistant", base)
         self.assertIn("automountServiceAccountToken: false", base)
+
+    def test_cleanup_preserves_namespace_and_workshop_rbac(self) -> None:
+        cleanup = (MODULE_DIR / "scripts" / "cleanup-application.sh").read_text()
+        resources = (
+            "service/mortgage-assistant",
+            "deployment/mortgage-assistant",
+            "poddisruptionbudget/mortgage-assistant",
+            "secret/mortgage-assistant-api-key",
+            "serviceaccount/mortgage-assistant",
+        )
+        positions = []
+        for resource in resources:
+            command = (
+                f"kubectl delete {resource} \\\n"
+                "  --namespace mortgage-assistant \\\n"
+                "  --ignore-not-found \\\n"
+                "  --wait=true \\\n"
+                "  --timeout=15m"
+            )
+            self.assertIn(command, cleanup)
+            positions.append(cleanup.index(command))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("kubectl delete namespace", cleanup)
+        self.assertNotIn("kubectl delete all", cleanup)
 
     def test_manifest_hardening_and_availability(self) -> None:
         manifest = (MODULE_DIR / "k8s" / "service.template.yaml").read_text()

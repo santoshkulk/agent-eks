@@ -14,10 +14,12 @@ Options:
   --profile PROFILE  AWS CLI profile; omit to use the default profile.
   -h, --help         Show this help.
 
-This removes the Lab 05 Kubernetes application only (including the
-langfuse-otel-auth Secret, which lives in the same namespace). Shared
-infrastructure, including the DynamoDB memory table and the self-hosted
-Langfuse deployment, remains managed by Workshop Studio.
+This removes the Lab 05 participant application resources and Network Load
+Balancer from the pre-provisioned mortgage-assistant namespace, including the
+langfuse-otel-auth Secret. It preserves the namespace and Workshop
+Studio-managed RBAC. Shared infrastructure, including the DynamoDB memory
+table and the self-hosted Langfuse deployment, remains managed by Workshop
+Studio.
 EOF
 }
 
@@ -52,11 +54,38 @@ echo "Removing the Lab 05 EKS application and load balancer"
 aws_cli eks update-kubeconfig \
   --name "$CLUSTER_NAME" \
   --alias "$CLUSTER_NAME" >/dev/null
-kubectl delete namespace mortgage-assistant \
+kubectl delete service/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete deployment/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete poddisruptionbudget/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete secret/mortgage-assistant-api-key \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete secret/langfuse-otel-auth \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete serviceaccount/mortgage-assistant \
+  --namespace mortgage-assistant \
   --ignore-not-found \
   --wait=true \
   --timeout=15m
 
-echo "Lab 05 application removed."
+echo "Lab 05 participant application resources were removed."
+echo "The pre-provisioned namespace and Workshop Studio RBAC were preserved."
 echo "Shared DynamoDB memory infrastructure and the self-hosted Langfuse"
 echo "deployment remain managed by Workshop Studio."

@@ -259,7 +259,7 @@ voluntary disruptions.
 
 Two further controls keep requests flowing while pods are replaced:
 
-- **Pod readiness gates.** The namespace carries the label
+- **Pod readiness gates.** Workshop Studio pre-provisions the namespace with
   `elbv2.k8s.aws/pod-readiness-gate-inject: enabled`. AWS Load Balancer
   Controller then adds a readiness gate to each new pod, and the rollout does
   not continue until the Network Load Balancer reports that pod's target as
@@ -376,7 +376,9 @@ The pod configuration:
 - Requests `250m` CPU and `512Mi` memory per pod.
 - Limits each pod to one CPU and `2Gi` memory.
 
-The namespace enables the Kubernetes restricted Pod Security Standard.
+Workshop Studio pre-provisions the namespace with the Kubernetes restricted
+Pod Security Standard. The participant manifests do not create or relabel the
+namespace.
 
 ### EKS Pod Identity
 
@@ -408,7 +410,8 @@ the application to:
 6. Authenticates Docker with Amazon ECR.
 7. Builds a `linux/amd64` image with an immutable timestamped tag.
 8. Pushes the image to the existing ECR repository.
-9. Creates or updates the Kubernetes namespace and service account.
+9. Creates or updates the Kubernetes service account in the pre-provisioned
+   `mortgage-assistant` namespace.
 10. Creates the API-key Kubernetes Secret, or reuses the existing key on
     later runs.
 11. Validates the template values, then renders and applies the Deployment,
@@ -1501,9 +1504,11 @@ and its load balancer:
 ./scripts/cleanup-application.sh --region us-west-2
 ```
 
-Deleting the namespace removes the Deployment, pods, API-key Secret,
-PodDisruptionBudget, Service, and associated Network Load Balancer. The EKS
-cluster, ECR repository, Bedrock Knowledge Base, DynamoDB memory
+The cleanup script deletes the Service first so Kubernetes can finish Network
+Load Balancer cleanup, then removes the named Deployment,
+PodDisruptionBudget, API-key Secret, and ServiceAccount. It preserves the
+pre-provisioned `mortgage-assistant` namespace and Workshop Studio-managed
+RBAC. The EKS cluster, ECR repository, Bedrock Knowledge Base, DynamoDB memory
 infrastructure, and other Workshop Studio foundation resources remain until
 the participant environment ends.
 

@@ -188,6 +188,9 @@ kubectl rollout status \
   deployment/aws-load-balancer-controller \
   --timeout=10m
 
+echo "Preparing the mortgage-assistant namespace for Labs 3 and 4"
+kubectl apply -f "$MODULE_DIR/k8s/namespace.yaml"
+
 echo "Publishing the Parameter Store values that Labs 3 and later read"
 publish_parameter() {
   aws_cli ssm put-parameter \

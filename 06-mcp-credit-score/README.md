@@ -97,9 +97,10 @@ invokes the fixed server. Participants must not modify, restart, scale, replace,
 or delete any credit-services resource, even when workshop permissions permit
 it.
 
-The deployment and cleanup scripts modify only the participant-owned
-`mortgage-assistant` namespace. Cleanup leaves `credit-services`, the fixed MCP
-SSM parameter, and shared AWS resources unchanged.
+The deployment and cleanup scripts modify only participant-owned resources in
+the pre-provisioned `mortgage-assistant` namespace. Cleanup preserves that
+namespace and its Workshop Studio-managed RBAC, and leaves `credit-services`,
+the fixed MCP SSM parameter, and shared AWS resources unchanged.
 
 ## Credit-score safety
 
@@ -334,6 +335,8 @@ hydration use synthetic test data and do not change the MCP server.
 ./scripts/cleanup-mcp-integration.sh --region us-west-2
 ```
 
-Cleanup removes only participant-owned `mortgage-assistant` resources. It does
-not modify or delete credit-services, the MCP SSM endpoint, EKS, ECR, the
-Knowledge Base, DynamoDB memory, or self-hosted Langfuse.
+Cleanup removes only named participant application resources and the load
+balancer from the pre-provisioned `mortgage-assistant` namespace. It preserves
+that namespace and Workshop Studio-managed RBAC. It does not modify or delete
+`credit-services`, the MCP SSM endpoint, EKS, ECR, the Knowledge Base, DynamoDB
+memory, or self-hosted Langfuse.

@@ -14,11 +14,11 @@ Options:
   --profile PROFILE  AWS CLI profile; omit to use the default profile.
   -h, --help         Show this help.
 
-This removes the Lab 03 Kubernetes application only: the mortgage-assistant
-namespace, its Deployment, pods, API-key Secret, PodDisruptionBudget, Service,
-and the Network Load Balancer. Do not run it if you are continuing to Lab 04.
-The EKS cluster, ECR repository, Knowledge Base, and other shared
-infrastructure remain managed by Workshop Studio.
+This removes the Lab 03 participant application resources and Network Load
+Balancer from the pre-provisioned mortgage-assistant namespace. It preserves
+the namespace and Workshop Studio-managed RBAC. Do not run it if you are
+continuing to Lab 04. The EKS cluster, ECR repository, Knowledge Base, and
+other shared infrastructure remain managed by Workshop Studio.
 USAGE
 }
 
@@ -53,10 +53,32 @@ echo "Removing the Lab 03 EKS application and load balancer from $CLUSTER_NAME"
 aws_cli eks update-kubeconfig \
   --name "$CLUSTER_NAME" \
   --alias "$CLUSTER_NAME" >/dev/null
-kubectl delete namespace mortgage-assistant \
+kubectl delete service/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete deployment/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete poddisruptionbudget/mortgage-assistant \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete secret/mortgage-assistant-api-key \
+  --namespace mortgage-assistant \
+  --ignore-not-found \
+  --wait=true \
+  --timeout=15m
+kubectl delete serviceaccount/mortgage-assistant \
+  --namespace mortgage-assistant \
   --ignore-not-found \
   --wait=true \
   --timeout=15m
 
-echo "Lab 03 application removed."
+echo "Lab 03 participant application resources were removed."
+echo "The pre-provisioned namespace and Workshop Studio RBAC were preserved."
 echo "Shared Workshop Studio infrastructure was not modified."
