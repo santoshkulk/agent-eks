@@ -69,7 +69,7 @@ credit-services/service/credit-score-mcp:8081
 http://credit-score-mcp.credit-services.svc.cluster.local:8081/mcp
 ```
 
-Participants may inspect and call the MCP server, but must not modify, restart, scale, replace, or delete its namespace, Deployment, pods, Service, endpoint, image, or configuration. Broad workshop permissions do not transfer ownership. The credit-services team manages the MCP server. In production, another organizational team could own and maintain it in another account, network, or EKS cluster.
+Participants may inspect and call the MCP server, but must not modify, restart, scale, replace, or delete its namespace, Deployment, pods, Service, endpoint, image, or configuration. Participants receive only the access required for the documented workshop operations; that access does not transfer ownership of shared resources. The credit-services team manages the MCP server. In production, another organizational team could own and maintain it in another account, network, or EKS cluster.
 
 The standalone `00-workshop-setup` path does not create this MCP server or the `/workshop/mortgage-assistant/mcp/credit-score-url` Parameter Store value. Lab 6 requires a Workshop Studio-provisioned environment.
 
