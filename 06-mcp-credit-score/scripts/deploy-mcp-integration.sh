@@ -287,6 +287,56 @@ if ! kubectl rollout status \
   exit 1
 fi
 
+echo "Waiting for prior checkpoint pods to terminate"
+CURRENT_PODS_READY=false
+for attempt in $(seq 1 36); do
+  if kubectl get pods \
+      --namespace mortgage-assistant \
+      --selector app.kubernetes.io/name=mortgage-assistant \
+      --field-selector status.phase=Running \
+      --output json |
+    python3 -c '
+import json
+import sys
+
+expected_image = sys.argv[1]
+pods = json.load(sys.stdin).get("items", [])
+if len(pods) != 2:
+    raise SystemExit(1)
+for pod in pods:
+    containers = pod.get("spec", {}).get("containers", [])
+    application = next(
+        (container for container in containers if container.get("name") == "mortgage-assistant"),
+        None,
+    )
+    conditions = pod.get("status", {}).get("conditions", [])
+    ready = any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in conditions
+    )
+    if (
+        pod.get("metadata", {}).get("deletionTimestamp")
+        or application is None
+        or application.get("image") != expected_image
+        or not ready
+    ):
+        raise SystemExit(1)
+' "$IMAGE_URI"; then
+    CURRENT_PODS_READY=true
+    break
+  fi
+  echo "Waiting for current Lab 6 pods (attempt $attempt of 36)"
+  sleep 10
+done
+if [[ "$CURRENT_PODS_READY" != "true" ]]; then
+  kubectl get pods \
+    --namespace mortgage-assistant \
+    --selector app.kubernetes.io/name=mortgage-assistant \
+    --output custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,READY:.status.containerStatuses[0].ready,DELETING:.metadata.deletionTimestamp'
+  echo "Timed out waiting for only the current Lab 6 pods to remain ready." >&2
+  exit 1
+fi
+
 echo "Waiting for the Network Load Balancer endpoint"
 SERVICE_ENDPOINT=""
 for _ in $(seq 1 60); do
@@ -307,10 +357,29 @@ fi
 echo "Waiting for the Lab 06 mortgage API readiness endpoint"
 READY_STREAK=0
 for _ in $(seq 1 60); do
-  if curl --fail --silent --show-error \
-    --connect-timeout 5 \
-    --max-time 10 \
-    "http://${SERVICE_ENDPOINT}/health/ready" >/dev/null 2>&1; then
+  READY_RESPONSE=""
+  if READY_RESPONSE="$(curl --fail --silent --show-error \
+      --connect-timeout 5 \
+      --max-time 10 \
+      "http://${SERVICE_ENDPOINT}/health/ready" 2>/dev/null)" &&
+    python3 -c '
+import json
+import sys
+
+response = json.loads(sys.argv[1])
+expected = {
+    "status": "ready",
+    "knowledge_base_id": sys.argv[2],
+    "model_id": sys.argv[3],
+    "memory_table": sys.argv[4],
+    "memory_embedding_model_id": sys.argv[5],
+    "credit_score_mcp": "configured",
+}
+if any(response.get(key) != value for key, value in expected.items()):
+    raise SystemExit(1)
+' "$READY_RESPONSE" "$KNOWLEDGE_BASE_ID" "$MODEL_ID" \
+      "$MEMORY_TABLE_NAME" "$MEMORY_EMBEDDING_MODEL_ID" \
+      >/dev/null 2>&1; then
     READY_STREAK=$((READY_STREAK + 1))
     if [[ "$READY_STREAK" -ge 2 ]]; then
       break
