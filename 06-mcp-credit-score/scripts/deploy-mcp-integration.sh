@@ -438,7 +438,6 @@ print(response["request_id"], trace_id)
 
 cat <<EOF
 
-Lab 06 completed.
   EKS cluster: $CLUSTER_NAME
   Memory table: $MEMORY_TABLE_NAME
   Vector index: $MEMORY_VECTOR_INDEX_NAME
