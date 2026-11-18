@@ -47,7 +47,7 @@ Parameters:
     Description: Embedding model whose default output matches the 1024-dimension vector index.
   AgentModelId:
     Type: String
-    Default: us.anthropic.claude-sonnet-4-6
+    Default: us.anthropic.claude-sonnet-5
   KnowledgeBaseParameterName:
     Type: String
     Default: /workshop/mortgage-assistant/bedrock/knowledge-base-id

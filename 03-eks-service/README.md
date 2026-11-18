@@ -400,7 +400,7 @@ the application to:
 
 1. Reads the EKS cluster name from `/workshop/mortgage-assistant/eks/cluster-name` and the ECR
    repository URI from `/workshop/mortgage-assistant/ecr/repository-uri` in SSM Parameter Store.
-2. Uses the `us.anthropic.claude-sonnet-4-6` model unless you pass
+2. Uses the `us.anthropic.claude-sonnet-5` model unless you pass
    `--model-id`, and reads the Knowledge Base ID parameter name from
    `/workshop/mortgage-assistant/bedrock/knowledge-base-id` unless you set
    `KB_PARAMETER_NAME`.
@@ -660,7 +660,7 @@ Expected response:
 {
   "status": "ready",
   "knowledge_base_id": "YOUR_KNOWLEDGE_BASE_ID",
-  "model_id": "us.anthropic.claude-sonnet-4-6"
+  "model_id": "us.anthropic.claude-sonnet-5"
 }
 ```
 

@@ -19,7 +19,7 @@ from strands_tools.retrieve import retrieve
 logger = logging.getLogger(__name__)
 MODEL_ID = os.environ.get(
     "MODEL_ID",
-    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-sonnet-5",
 )
 KB_PARAMETER_NAME = os.environ.get("KB_PARAMETER_NAME")
 CUSTOMER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")

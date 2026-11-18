@@ -8,7 +8,7 @@ SERVICE_ACCESS_CIDR=""
 PROMPT="What are the benefits of a 15-year mortgage?"
 CLUSTER_NAME_PARAMETER="${CLUSTER_NAME_PARAMETER:-/workshop/mortgage-assistant/eks/cluster-name}"
 REPOSITORY_URI_PARAMETER="${REPOSITORY_URI_PARAMETER:-/workshop/mortgage-assistant/ecr/repository-uri}"
-MODEL_ID="us.anthropic.claude-sonnet-4-6"
+MODEL_ID="us.anthropic.claude-sonnet-5"
 KB_PARAMETER_NAME="${KB_PARAMETER_NAME:-/workshop/mortgage-assistant/bedrock/knowledge-base-id}"
 
 usage() {
@@ -21,7 +21,7 @@ Options:
   --service-access-cidr CIDR  CIDR allowed to invoke the API (default: detected-ip/32).
   --prompt TEXT               Prompt used for the deployment smoke test.
   --model-id MODEL_ID         Bedrock model or inference profile ID
-                              (default: us.anthropic.claude-sonnet-4-6).
+                              (default: us.anthropic.claude-sonnet-5).
   -h, --help                  Show this help.
 
 Environment variables:

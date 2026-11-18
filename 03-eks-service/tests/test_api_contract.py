@@ -31,7 +31,7 @@ class ApiContractTests(unittest.TestCase):
         self.headers = {"Authorization": "Bearer test-api-key"}
 
     def test_canonical_model_and_explicit_knowledge_base_configuration(self) -> None:
-        self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-4-6")
+        self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-5")
         self.assertEqual(
             mortgage_agent.KB_PARAMETER_NAME,
             "/workshop/mortgage-assistant/bedrock/knowledge-base-id",

@@ -269,7 +269,7 @@ and cleanup do not delete records.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MODEL_ID` | `us.anthropic.claude-sonnet-4-6` | Supervisor and specialist model. |
+| `MODEL_ID` | `us.anthropic.claude-sonnet-5` | Supervisor and specialist model. |
 | `KB_PARAMETER_NAME` | required | Knowledge Base parameter path. |
 | `MEMORY_TABLE_NAME` | required | Shared DynamoDB table. |
 | `MEMORY_VECTOR_INDEX_NAME` | `vector_index` | DynamoDB vector index. |

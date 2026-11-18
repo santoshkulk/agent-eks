@@ -31,7 +31,7 @@ class ApiContractTests(unittest.TestCase):
         }
 
     def test_model_and_knowledge_base_configuration(self) -> None:
-        self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-4-6")
+        self.assertEqual(mortgage_agent.MODEL_ID, "us.anthropic.claude-sonnet-5")
         self.assertEqual(
             mortgage_agent.KB_PARAMETER_NAME,
             os.environ.get("KB_PARAMETER_NAME"),
